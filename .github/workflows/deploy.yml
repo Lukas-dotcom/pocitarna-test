@@ -3,28 +3,25 @@ name: Deploy via SCP
 on:
   push:
     branches: [ "main" ]
-    # => Spouští se automaticky na push do větve main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Stáhne váš kód z repozitáře
       - name: Check out code
         uses: actions/checkout@v3
 
-      # 2) Nainstaluje sshpass a provede SCP
-      - name: Deploy files to SFTP via SCP
+      # Zobrazíme, jaké soubory jsou dostupné v pracovním adresáři
+      - name: Zkontroluj obsah repozitáře
+        run: ls -la
+
+      # Pokud soubory jsou v podsložce, změníme zdrojovou cestu v SCP
+      - name: Upload files to SFTP via SCP
         run: |
           sudo apt-get update
           sudo apt-get install -y sshpass
-
-          # Nastavte si port, pokud není 22
-          PORT=22
-
-          # Kopírujeme rekurzivně ( -r ), potlačíme varování SSH ( -o StrictHostKeyChecking=no )
-          # a předáme heslo pomocí sshpass -p "..."
+          
           sshpass -p "${{ secrets.FTP_PASS }}" \
-            scp -P $PORT -o StrictHostKeyChecking=no -r ./dist/* \
+            scp -P 22 -o StrictHostKeyChecking=no -r * \
             ${{ secrets.FTP_USER }}@${{ secrets.FTP_HOST }}:/upload/luke-styly-kody
