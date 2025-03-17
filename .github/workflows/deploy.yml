@@ -1,23 +1,26 @@
-name: Deploy to FTP
+name: Deploy via SFTP
 
 on:
   push:
     branches: [ "main" ]
+    # => spuštění na každý push do větve "main"
 
 jobs:
-  ftp-deploy:
+  sftp-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
-      - name: Deploy files via FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+      - name: Upload via SFTP
+        uses: appleboy/scp-action@v0.1.3
         with:
-          server: ${{ secrets.FTP_HOST }}
-          protocol: sftp
+          host: ${{ secrets.SFTP_HOST }}
           port: 22
-          username: ${{ secrets.FTP_USER }}
-          password: ${{ secrets.FTP_PASS }}
-          local-dir: ./
-          server-dir: ${{ secrets.FTP_DIR }}
+          username: ${{ secrets.SFTP_USER }}
+          password: ${{ secrets.SFTP_PASS }}
+
+
+          source: ".*"  # Třeba vše z kořene (pozor na skryté soubory)
+
+          target: "/user/documents/upload/luke-styly-kody"
