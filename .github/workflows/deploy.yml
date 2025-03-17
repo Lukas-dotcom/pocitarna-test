@@ -23,4 +23,4 @@ jobs:
 
           source: ".*"  # Třeba vše z kořene (pozor na skryté soubory)
 
-          target: "user/documents/upload/luke-styly-kody"
+          target: "644482.myshoptet.com/user/documents/upload/luke-styly-kody"
