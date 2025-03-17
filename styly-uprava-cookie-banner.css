@@ -1,0 +1,70 @@
+.siteCookies__form {
+    container-type: inline-size;
+}
+
+@container (min-width: 560px) {
+    
+    .siteCookies__links {
+        height: 30px !important;
+    }
+
+    .siteCookies__links .siteCookies__link.js-cookies-settings {
+        position: relative !important;
+        top: 21px !important;
+        border: none !important;
+        text-decoration:underline;
+        left:45px
+    }
+
+    .siteCookies__buttonWrap {
+        right: 35px !important;
+        top: 130px !important;
+        position: absolute !important;
+        display: flex;
+        gap: 35px !important;
+    }
+    
+    .siteCookies__buttonWrap .siteCookies__button[value="all"] {
+width: 260px;
+}
+    
+     .siteCookies__buttonWrap .siteCookies__button{
+    height: 50px !important;
+}
+    
+     .siteCookies__buttonWrap .siteCookies__button[value="reject"] {
+    width: 156px;
+    background:none !important;
+    color:white !important;
+    text-decoration: underline;
+    }
+}
+
+@container (max-width: 559px) {
+    
+    .siteCookies__links .siteCookies__link.js-cookies-settings {
+        border: none !important;
+        text-decoration:underline;
+        bottom: 30px;
+    }
+
+		.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
+    padding: 1.25rem .9375rem 3.1rem .9375rem !important;
+		}
+
+
+
+    .siteCookies__buttonWrap {
+    display: flex;
+    flex-direction: column-reverse;
+    margin-top: 25px;
+    margin-bottom:20px !important;
+    
+    }
+     .siteCookies__buttonWrap .siteCookies__button[value="reject"] {
+    background:none !important;
+    color:white !important;
+    text-decoration: underline;
+    height:35px !important;
+    }
+}

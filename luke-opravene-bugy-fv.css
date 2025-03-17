@@ -1,0 +1,5 @@
+@media (max-width: 767.98px) {
+    div.form-option-block div.form-group.js-validated-element-wrapper.smart-label-wrapper {
+        padding-right: 1.25rem;
+    }
+}

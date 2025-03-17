@@ -1,0 +1,36 @@
+/* [VŠUDE]*/
+/* štítky pryč pro B2b*/
+
+body[fv-customer-status="b2b"] .flags.flags-extra {
+  display: none;
+}
+
+/* [KOŠÍK]*/
+
+/* K-Styl pro informační panel v košíku*/
+#additional-info-panel {
+    background-color: #e3f6f5;
+    padding: 24px 12px;
+    border-radius: 6px;
+    text-align: center;
+    margin: 20px 0 0 0;
+    font-size: 16px;
+    color: #000;
+    border: none;
+}
+
+#additional-info-panel p {
+    margin: 0;                                 /* Odstraní výchozí odsazení odstavce */
+}
+
+/* [TITULKA]*/
+/*skrytí slider tlačítek caroseul na mobilu*/ 
+
+@media (max-width: 991.98px) {
+  #carousel.carousel.slide[data-editorid="carousel"] 
+    .carousel-inner.slick-initialized.slick-slider.slick-dotted button.slick-prev.slick-arrow,
+  #carousel.carousel.slide[data-editorid="carousel"] 
+    .carousel-inner.slick-initialized.slick-slider.slick-dotted button.slick-next.slick-arrow {
+      display: none !important;
+  }
+}
