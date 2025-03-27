@@ -5,6 +5,15 @@ body[fv-customer-status="b2b"] .flags.flags-extra {
   display: none;
 }
 
+
+/*skrytí výprodejového štítku všude*skrývá se aby se mohl scriptem zobrazovat pro adminy*/
+.luigi-ac-image .flag.flag-sale,
+.luigi-ac-image .flag.flag-vyprodej,
+.luigi-ac-image .flag.flag-custom1 {
+  display: none;
+}
+
+
 /* [KOŠÍK]*/
 
 /* K-Styl pro informační panel v košíku*/
