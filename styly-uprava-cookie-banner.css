@@ -9,12 +9,19 @@
     }
 
     .siteCookies__links .siteCookies__link.js-cookies-settings {
-        position: relative !important;
-        top: 21px !important;
+        position: absolute !important;
+        top: 122px !important;
         border: none !important;
         text-decoration:underline;
-        left:45px
+        left:60px
     }
+
+    .siteCookies__link:link{
+        width: 120px !important;
+        height: 40px !important;
+    }
+
+
 
     .siteCookies__buttonWrap {
         right: 35px !important;
@@ -28,15 +35,26 @@
 width: 260px;
 }
     
+.siteCookies__text {
+    margin-bottom: 0px !important;
+}
+
+.siteCookies--bottom .siteCookies__form {
+padding: 1.25rem .9375rem 0rem .9375rem !important;
+height: 250px;
+
+}
+
+
      .siteCookies__buttonWrap .siteCookies__button{
     height: 50px !important;
 }
     
      .siteCookies__buttonWrap .siteCookies__button[value="reject"] {
-    width: 156px;
+    width: 136px;
     background:none !important;
     color:white !important;
-    text-decoration: underline;
+    border: 1px solid !important;
     }
 }
 
