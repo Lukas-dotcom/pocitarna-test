@@ -279,51 +279,5 @@ window.addEventListener("load", function() {
     setTimeout(applySearchTooltips, 2000);
 });
 
-function applyVyprodejHighlights() {
-  // 1. Zobrazit .flag-vyprodej
-  document.querySelectorAll(".flag.flag-vyprodej").forEach(el => {
-    el.style.display = "flex";
-  });
 
-  // 2. Zobrazit .flag-custom1, pokud obsahuje "výprodej"
-  document.querySelectorAll(".flag.flag-custom1").forEach(el => {
-    if (el.textContent.trim().toLowerCase().includes("výprodej")) {
-      el.style.display = "flex";
-    }
-  });
 
-  // 3. Zvýraznit všechny karty .product, které obsahují výprodejový štítek
-  document.querySelectorAll(".product").forEach(card => {
-    const vyprodejFlag = card.querySelector(".flag.flag-vyprodej, .flag.flag-custom1");
-    if (vyprodejFlag && vyprodejFlag.textContent.trim().toLowerCase().includes("výprodej")) {
-      console.log("🎯 Výprodej nalezen v kartě:", card);
-      card.style.background = "rgba(255, 255, 0, 0.25)";
-    }
-  });
-}
-
-<!-- [KAT zvýraznění výprodejových] -->
-document.addEventListener("DOMContentLoaded", function () {
-  const body = document.body;
-
-  if (body.classList.contains("admin-logged")) {
-
-    applyVyprodejHighlights(); // ← nahrazuje původní vnořený kód
-
-    // MutationObserver pro nové produkty a filtrování
-    const container = document.querySelector("#products") || document.body;
-
-    const observer = new MutationObserver((mutationsList) => {
-      for (const mutation of mutationsList) {
-        if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
-          applyVyprodejHighlights();
-          break;
-        }
-      }
-    });
-
-    observer.observe(container, { childList: true, subtree: true });
-
-  } else {
-  }
-});
