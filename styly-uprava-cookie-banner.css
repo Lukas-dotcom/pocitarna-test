@@ -5,7 +5,7 @@
 @container (min-width: 560px) {
     
     .siteCookies__links {
-        height: 30px !important;
+        height: 15px !important;
     }
 
     .siteCookies__links .siteCookies__link.js-cookies-settings {
@@ -39,9 +39,8 @@ width: 260px;
     margin-bottom: 0px !important;
 }
 
-.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
-padding: 1.25rem .9375rem 1px .9375rem !important;
-
+.siteCookies--bottom .siteCookies__form {
+    padding: 1.25rem .9375rem 1px .9375rem !important;
 }
 
 
@@ -65,7 +64,7 @@ padding: 1.25rem .9375rem 1px .9375rem !important;
         bottom: 30px;
     }
 
-		.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
+	.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
     padding: 1.25rem .9375rem 3.1rem .9375rem !important;
 		}
 
