@@ -62,7 +62,8 @@ width: 260px;
     .siteCookies__links .siteCookies__link.js-cookies-settings {
         border: none !important;
         text-decoration:underline;
-        bottom: 30px;
+        top: 340px;
+        height: 40px;
     }
 
 	.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
@@ -76,6 +77,11 @@ width: 260px;
     flex-direction: column-reverse;
     margin-top: 25px;
     margin-bottom:20px !important;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 280px;
     
     }
      .siteCookies__buttonWrap .siteCookies__button[value="reject"] {
