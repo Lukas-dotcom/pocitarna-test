@@ -39,7 +39,7 @@ width: 260px;
     margin-bottom: 0px !important;
 }
 
-.siteCookies--bottom .siteCookies__form {
+.siteCookies--bottom.siteCookies--dark .siteCookies__form {
     padding: 1.25rem .9375rem 1px .9375rem !important;
 }
 
