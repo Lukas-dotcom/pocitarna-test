@@ -1,8 +1,6 @@
 .siteCookies__form {
     container-type: inline-size;
-.siteCookies__form {
-        padding: 1.25rem .9375rem 1px .9375rem !important;
-    }
+    padding: 1.25rem .9375rem 1px .9375rem !important;
 }
 
 @container (min-width: 560px) {
