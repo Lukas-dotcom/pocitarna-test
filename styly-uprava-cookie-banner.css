@@ -62,13 +62,15 @@ width: 260px;
     .siteCookies__links .siteCookies__link.js-cookies-settings {
         border: none !important;
         text-decoration:underline;
-        top: 340px;
         height: 40px;
+        display: inline-block;
+        width: auto;
     }
 
-	.siteCookies.siteCookies--bottom.siteCookies--dark.js-siteCookies .siteCookies__form {
-    padding: 1.25rem .9375rem 3.1rem .9375rem !important;
-		}
+    .siteCookies__links {
+        width: auto;
+        margin: 0 auto;
+    }
 
 
 
