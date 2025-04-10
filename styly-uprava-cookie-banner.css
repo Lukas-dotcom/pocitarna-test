@@ -93,3 +93,16 @@
         height: 50px !important;
     }
 }
+
+@supports not (container-type: inline-XYsize) {
+    /* Skryj nové odkazy s cookiesSettingsNew uvnitř siteCookies__text */
+    .siteCookies__text .siteCookies__links:has(.cookiesSettingsNew) {
+        display: none !important;
+    }
+
+    /* Skryj nové tlačítka uvnitř siteCookies__text */
+    .siteCookies__text .siteCookies__buttonWrap:has(.cookiesAcceptNew),
+    .siteCookies__text .siteCookies__buttonWrap:has(.cookiesRejectNew) {
+        display: none !important;
+    }
+}
