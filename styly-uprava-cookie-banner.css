@@ -1,6 +1,6 @@
 @supports (container-type: inline-size) {
     .siteCookies__form {
-        container-type: inline-XYsize;
+        container-type: inline-size;
         padding: 1.25rem .9375rem 1px .9375rem !important;
     }
 
