@@ -1,4 +1,4 @@
-@supports (container-type: inline-XYsize) {
+@supports (container-type: inline-size) {
     .siteCookies__form {
         container-type: inline-XYsize;
         padding: 1.25rem .9375rem 1px .9375rem !important;
@@ -94,7 +94,7 @@
     }
 }
 
-@supports not (container-type: inline-XYsize) {
+@supports not (container-type: inline-size) {
     /* Skryj nové odkazy s cookiesSettingsNew uvnitř siteCookies__text */
     .siteCookies__text .siteCookies__links:has(.cookiesSettingsNew) {
         display: none !important;
