@@ -1,221 +1,416 @@
-// === Context collector for Shoptet frontend – v2 ===
-// collects (1) dataLayer / shoptet object   (2) DOM‑only data
-// then emits:   contextDataLayerReady   &   contextDOMready
-// finally dumps timing + snapshots to console for quick verification
+// =======================================================
+//  Shoptet – Front‑end Context Collector (pure JS)
+//  ---------------------------------------------------
+//  • Section 1  → reads the latest Shoptet object that
+//                 lives inside `window.dataLayer`.
+//  • Section 2  → scrapes the visible DOM according to
+//                 `pageType` and keeps it in sync.
+//  • Both parts fire hub events:
+//         –  `contextDataLayerReady`
+//         –  `contextDOMready`
+//    with a plain‑object snapshot of the collected data.
+//  • For dev/debug the script prints the snapshot and the
+//    time spent in each section to the console.
+// =======================================================
 
-(function () {
-  "use strict";
-
-  /*─────────────────────────── helpers ───────────────────────────*/
-  const $  = (q, root = document) => root.querySelector(q);
-  const $$ = (q, root = document) => Array.from(root.querySelectorAll(q));
-  const txt = (el) => (el ? el.textContent.replace(/\u00A0/g, " ").trim() : "");
-  const num = (s) => {
-    const n = parseFloat(String(s).replace(/[\s\u00A0]/g, "").replace(/,/g, "."));
-    return Number.isFinite(n) ? n : undefined;
-  };
-  const stripCur = (s) => s.replace(/[€£$]|Kč|CZK|EUR|USD/gi, "");
-  const getMs = (start) => Math.round((performance.now() - start) * 10) / 10;
-
-  /*──────────────────────── timing ───────────────────────────────*/
-  const startedAt = performance.now();
-  const timing = {
-    startedAt: 0,            // always 0 (start reference)
-    gtmDL:   { ready: false, t: null, data: null },
-    shoptetObj: { ready: false, t: null, data: null },
-    inlineDL:  { ready: false, t: null, data: null },
-    domCtx:    { ready: false, t: null, data: null }
-  };
-
-  /*──────────────────── section 1 – dataLayer ───────────────────*/
-  function readInlineDL () {
-    try {
-      const inline = document.querySelectorAll("script");
-      for (const s of inline) {
-        if (!s.textContent.includes("dataLayer = []")) continue;
-        const m = s.textContent.match(/dataLayer\.push\((\{[\s\S]+?\})\)/);
-        if (!m) continue;
-        // eslint-disable-next-line no-new-func
-        const obj = Function("return " + m[1])();
-        return obj.shoptet?.customer ? obj.shoptet : null;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  function finishInlineDL (data) {
-    timing.inlineDL.ready = true;
-    timing.inlineDL.t     = getMs(startedAt);
-    timing.inlineDL.data  = data;
-    maybeFireDLReady();
-  }
-
-  const inlineData = readInlineDL();
-  if (inlineData) finishInlineDL(inlineData);
-
-  // ── wait for window.dataLayer push with customer info ──
-  function hookDataLayer () {
-    if (!window.dataLayer) window.dataLayer = [];
-    const origPush = window.dataLayer.push;
-    window.dataLayer.push = function (...args) {
-      const res = origPush.apply(this, args);
-      scanDataLayer();
-      return res;
+(function initContextFrontend(){
+  // ----------  Small safe pub/sub BUS  ----------
+  const BUS = (function(){
+    const map = new Map();
+    return {
+      on(ev, fn){
+        const arr = map.get(ev) || [];
+        arr.push(fn); map.set(ev, arr);
+        return () => { const a = map.get(ev) || []; const i = a.indexOf(fn); if(i>-1){ a.splice(i,1); map.set(ev,a);} };
+      },
+      emit(ev, payload){ (map.get(ev)||[]).slice().forEach(fn=>{ try{ fn(payload); }catch(e){ console.error('[bus]',e);} }); }
     };
-    scanDataLayer();
-  }
-  hookDataLayer();
+  })();
 
-  function scanDataLayer () {
-    const dlItem = window.dataLayer.find((o) => o && o.shoptet && o.shoptet.customer);
-    if (dlItem && !timing.gtmDL.ready) {
-      timing.gtmDL.ready = true;
-      timing.gtmDL.t     = getMs(startedAt);
-      timing.gtmDL.data  = dlItem.shoptet.customer;
-      maybeFireDLReady();
-    }
-  }
+  // ----------  Helpers  ----------
+  const $  = (q, r=document) => r.querySelector(q);
+  const $$ = (q, r=document) => Array.from(r.querySelectorAll(q));
 
-  // ── shoptet object on window (async) ──
-  function pollShoptetObj () {
-    if (timing.shoptetObj.ready) return;
-    if (window.shoptet && window.shoptet.customer) {
-      timing.shoptetObj.ready = true;
-      timing.shoptetObj.t     = getMs(startedAt);
-      timing.shoptetObj.data  = window.shoptet.customer;
-      maybeFireDLReady();
-    } else {
-      requestAnimationFrame(pollShoptetObj);
-    }
-  }
-  pollShoptetObj();
+  const ctx = Object.create(null);
 
-  /*──────── emit BUS event after both dataLayer & shoptetObj ─────*/
-  function maybeFireDLReady () {
-    if (timing.inlineDL.ready && timing.shoptetObj.ready && timing.gtmDL.ready) {
-      if (maybeFireDLReady.done) return; // once
-      maybeFireDLReady.done = true;
-      window.dispatchEvent(new CustomEvent("contextDataLayerReady", { detail: {
-        inline: timing.inlineDL.data,
-        shoptet: timing.shoptetObj.data,
-        gtm: timing.gtmDL.data,
-        t: timing.gtmDL.t
-      }}));
-    }
-  }
+  const t0 = performance.now();
 
-  /*────────────────── section 2 – DOM parsing ───────────────────*/
-  const domCtx = {};
-  function readDomCtx () {
-    const pageType = timing.inlineDL.data?.pageType || window.shoptet?.pageType || "";
-    if (pageType !== "productDetail") return; // only PD for now
+  // =================================================
+  //  SECTION 1 – DATALAYER
+  // =================================================
+  function readDataLayer(){
+    const last = (window.dataLayer||[]).slice().reverse().find(o => o && o.shoptet);
+    if(!last){ return; }
 
-    /* prices */
-    const pWrap = $(".p-final-price-wrapper");
-    domCtx.standardPrice   = num(stripCur(txt(pWrap?.querySelector(".price-standard"))));
-    domCtx.priceSave       = txt(pWrap?.querySelector(".price-save"));
-    domCtx.finalPrice      = num(stripCur(txt(pWrap?.querySelector(".price-final"))));
-    domCtx.additionalPrice = num(stripCur(txt(pWrap?.querySelector(".price-additional"))));
+    const s = last.shoptet || {};
 
-    /* delivery estimate */
-    domCtx.deliveryEstimate = txt($(".detail-parameters .delivery-time, .delivery-time[data-testid='deliveryTime']"));
+    // --- simple scalars ---------------------------------
+    const pick = [
+      'pageType','currency','currencyInfoDecimalSeparator','currencyInfoExchangeRate',
+      'currencyInfoPriceDecimalPlaces','currencyInfoSymbol','language','projectId',
+      'trafficType'
+    ];
+    pick.forEach(k => ctx[k] = s[k]);
 
-    /* short description */
-    domCtx.shortDescription = $(".p-short-description")?.innerText.trim() || "";
-
-    /* cart amount + live update */
-    const qtyInput = $("input[name='amount'].amount");
-    if (qtyInput) {
-      domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
-      qtyInput.addEventListener("input", () => {
-        domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
-        window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
+    // --- cartInfo --------------------------------------
+    if(s.cartInfo){
+      const c = s.cartInfo;
+      Object.assign(ctx, {
+        cartInfoId: c.id,
+        cartInfoFreeShipping: c.freeShipping,
+        cartInfoLeftToFreeGiftFormatted: c.leftToFreeGiftFormatted,
+        cartInfoLeftToFreeGift: c.leftToFreeGift,
+        cartInfoFreeGift: c.freeGift,
+        cartInfoLeftToFreeShipping: c.leftToFreeShipping,
+        cartInfoLeftToFreeShippingFormatted: c.leftToFreeShippingformatted,
+        cartInfoDiscountCoupon: c.discountCoupon,
+        cartInfoNoBillingShippingPriceWithoutVat: c.noBillingShippingPriceWithoutVat,
+        cartInfoNoBillingShippingPriceWithVat: c.noBillingShippingPriceWithVat,
+        cartInfoNoBillingShippingPriceVat: c.noBillingShippingPriceVat,
+        cartInfoTaxMode: c.taxMode
       });
-      ["increase", "decrease"].forEach((cls) => {
-        $("button." + cls)?.addEventListener("click", () => {
-          // next tick (input already changed)
-          requestAnimationFrame(() => {
-            domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
-            window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
-          });
-        });
+      // cart items array
+      ctx.cartItems = (c.items||[]).map(i=>({
+        code: i.code,
+        guid: i.guid,
+        priceId: i.priceId,
+        quantity: i.quantity,
+        priceWithVat: i.priceWithVat,
+        priceWithoutDiscount: i.priceWithoutDiscount,
+        itemId: i.itemId,
+        name: i.name,
+        weight: i.weight
+      }));
+    }
+
+    // --- customer --------------------------------------
+    if(s.customer){
+      const cu = s.customer;
+      Object.assign(ctx, {
+        customerGuid: cu.guid,
+        customerEmail: cu.email,
+        customerFullName: cu.fullName,
+        customerPriceRatio: cu.priceRatio,
+        customerPriceListId: cu.priceListId,
+        customerGroupId: cu.groupId,
+        customerRegistered: cu.registered,
+        customerMainAccount: cu.mainAccount
       });
     }
 
-    /* related / alternative products */
-    function grabProducts (selector) {
-      return $$(selector).map((p) => {
-        const a = p.querySelector("a.image");
-        return {
-          code: p.querySelector(".p-code span")?.innerText.trim() || null,
-          id: p.dataset.microProductId || null,
-          url: a?.href || null,
-          img: a?.querySelector("img")?.src || null,
-          imgBig: a?.querySelector("img")?.dataset.microImage || null,
-          flags: $$(".flags span", p).map((f) => f.className.split(" ").find((c) => c.startsWith("flag-"))) || [],
-          name: txt(p.querySelector("[data-testid='productCardName']")),
-          rating: parseFloat(p.querySelector("[data-micro-rating-value]")?.dataset.microRatingValue) || null,
-          availability: txt(p.querySelector(".availability")),
-          availabilityTooltip: p.querySelector(".availability .show-tooltip")?.getAttribute("data-original-title") || "",
-          availabilityAmount: txt(p.querySelector("[data-testid='numberAvailabilityAmount']")),
-          standardPrice: txt(p.querySelector(".price-standard")),
-          priceSave: txt(p.querySelector(".price-save")),
-          finalPrice: txt(p.querySelector(".price-final")),
-          additionalPrice: txt(p.querySelector(".price-additional")),
-          priceId: p.querySelector("input[name='priceId']")?.value || null,
-          productId: p.querySelector("input[name='productId']")?.value || null,
-          csrf: p.querySelector("input[name='__csrf__']")?.value || null,
-          shortDescription: p.querySelector(".p-desc")?.innerText.trim() || "",
-          warranty: p.querySelector("[data-micro-warranty]")?.dataset.microWarranty || null
-        };
+    // --- product detail extras -------------------------
+    if(ctx.pageType === 'productDetail' && s.product){
+      const p = s.product;
+      Object.assign(ctx, {
+        productId: p.id,
+        productGuid: p.guid,
+        productHasVariants: p.hasVariants,
+        productCode: p.code,
+        productName: p.name,
+        productAppendix: p.appendix,
+        productWeight: p.weight,
+        productManufacturer: p.manufacturer,
+        productManufacturerGuid: p.manufacturerGuid,
+        productCurrentCategory: p.currentCategory,
+        productCurrentCategoryGuid: p.currentCategoryGuid,
+        productDefaultCategory: p.defaultCategory,
+        productDefaultCategoryGuid: p.defaultCategoryGuid,
+        productCurrency: p.currency,
+        productPriceWithVat: p.priceWithVat
       });
-    }
-    domCtx.relatedProducts     = grabProducts(".products-related .product");
-    domCtx.alternativeProducts = grabProducts(".products-alternative .product");
-
-    /* parameters from table */
-    const params = $(".detail-parameters tbody");
-    if (params) {
-      $$("tr", params).forEach((tr) => {
-        const keyEl = tr.querySelector("th span.row-header-label");
-        const valEl = tr.querySelector("td");
-        if (!keyEl || !valEl) return;
-        const rawKey = keyEl.textContent.replace(/[:\s]+$/, "");
-        const safeKey = rawKey.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-          .replace(/[^A-Za-z0-9]/g, "").replace(/^([0-9])/, "_$1");
-        const value = txt(valEl);
-        domCtx[`param${safeKey}`] = value;
-      });
+      ctx.productVariants = (p.variants||[]).map(v=>({
+        code:v.code, quantity:v.quantity, stockExt:v.stockExt, stockId:v.stockId
+      }));
+      ctx.stocks = (p.stocks||[]).map(s=>({id:s.id,title:s.title,isDeliveryPoint:s.isDeliveryPoint,visibleOnEshop:s.visibleOnEshop}));
     }
   }
 
-  function finishDomCtx () {
-    if (timing.domCtx.ready) return;
-    timing.domCtx.ready = true;
-    timing.domCtx.t     = getMs(startedAt);
-    timing.domCtx.data  = { ...domCtx };
-    window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
-    dumpLog();
+  readDataLayer();
+
+  const t1 = performance.now();
+  BUS.emit('contextDataLayerReady', { snapshot:{...ctx}, duration:t1-t0 });
+
+  // Re‑read DL when Shoptet internals update it
+  ['updateCartDataLayer','updateDataLayerCartInfo'].forEach(fnName => {
+    const orig = window[fnName];
+    if(typeof orig === 'function'){
+      window[fnName] = function patched(){
+        const r = orig.apply(this, arguments);
+        readDataLayer();
+        BUS.emit('contextDataLayerReady', { snapshot:{...ctx}, duration:0, via:fnName });
+        return r;
+      };
+    }
+  });
+
+  // =================================================
+  //  SECTION 2 – DOM SCRAPERS (per pageType)
+  // =================================================
+
+  // -------------- utilities ----------------
+  const priceNum = txt => {
+    if(!txt) return undefined;
+    return Number(txt.replace(/\u00a0/g,' ').replace(/[^0-9,.-]/g,'').replace(',','.')) || undefined;
+  };
+  const txt = (sel,r=document) => $(sel,r)?.textContent.trim();
+
+  function sanitizeParam(name){
+    return name.normalize('NFD')
+               .replace(/[^\w\s]/g,'')
+               .replace(/\s+/g,'')
+               .replace(/^\d+/,'');
   }
 
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    readDomCtx();
-    finishDomCtx();
-  } else {
-    window.addEventListener("DOMContentLoaded", () => {
-      readDomCtx();
-      finishDomCtx();
+  // -------------- PAGE PARSERS ----------------
+  function parseProductDetail(){
+    const start = performance.now();
+
+    // main price block
+    ctx.standardPrice   = txt('.p-final-price-wrapper .price-standard span');
+    ctx.priceSave       = txt('.p-final-price-wrapper .price-save');
+    ctx.finalPrice      = txt('.p-final-price-wrapper .price-final-holder');
+    ctx.additionalPrice = txt('.p-final-price-wrapper .price-additional');
+
+    // delivery date
+    ctx.deliveryEstimate = txt('.detail-parameters .delivery-time');
+
+    // amount input (with listeners for changes)
+    const amtInput = $('input[name="amount"][data-testid="cartAmount"]');
+    if(amtInput){
+      ctx.cartAmount = Number(amtInput.value);
+      ['change','input'].forEach(ev=>amtInput.addEventListener(ev,()=>{
+        ctx.cartAmount = Number(amtInput.value);
+        BUS.emit('contextDOMupdate',{ key:'cartAmount', value:ctx.cartAmount });
+      }));
+      // plus/minus buttons
+      $$('button[data-testid="increase"],button[data-testid="decrease"]').forEach(b=>
+        b.addEventListener('click',()=>setTimeout(()=>{
+          ctx.cartAmount = Number(amtInput.value);
+          BUS.emit('contextDOMupdate',{ key:'cartAmount', value:ctx.cartAmount });
+        },0)));
+    }
+
+    ctx.shortDescription = $('.p-short-description')?.innerHTML.trim();
+
+    // --- related + alternative products as tables ---
+    const grabProducts = (sel) => $$(sel+' .product').map(p=>{
+      const img = p.querySelector('a.image img');
+      const flags = $$('span.flag', p).map(f=>f.classList[1]||f.textContent.trim());
+      const priceStd = txt('.flags-extra .price-standard span', p) || txt('.price-standard span', p);
+      const priceSave = txt('.flags-extra .price-save', p) || txt('.price-save', p);
+      const finalPrice = txt('.price-final strong', p) || txt('.price.price-final strong', p);
+      const additionalPrice = txt('.price-additional', p);
+      const form = p.querySelector('form.pr-action');
+      return {
+        code: txt('.p-code span[data-micro="sku"]',p),
+        id: form?.querySelector('input[name="productId"]')?.value,
+        url: p.querySelector('a.image')?.href,
+        img: img?.src,
+        imgBig: img?.dataset.microImage,
+        flags,
+        name: txt('[data-testid="productCardName"]', p),
+        rating: Number(p.querySelector('.stars-wrapper')?.dataset.microRatingValue)||undefined,
+        availability: txt('.availability'),
+        availabilityTooltip: p.querySelector('.availability .show-tooltip')?.getAttribute('data-original-title')||'',
+        availabilityColor: p.querySelector('.availability span')?.style.color||'',
+        standardPrice: priceStd,
+        priceSave,
+        finalPrice,
+        additionalPrice,
+        priceId: form?.querySelector('input[name="priceId"]')?.value,
+        productId: form?.querySelector('input[name="productId"]')?.value,
+        csrf: form?.querySelector('input[name="__csrf__"]')?.value,
+        shortDescription: $('.p-desc', p)?.innerHTML.trim(),
+        warranty: p.querySelector('[data-micro-warranty]')?.getAttribute('data-micro-warranty')
+      };
     });
+
+    ctx.relatedProducts    = grabProducts('.products-related');
+    ctx.alternativeProducts = grabProducts('.products-alternative');
+
+    // --- category table params ---------------------------
+    const tblRows = $$('.detail-parameters tr');
+    tblRows.forEach(tr=>{
+      const header = tr.querySelector('th .row-header-label')?.textContent.replace(':','').trim();
+      const value  = tr.querySelector('td')?.innerText.trim();
+      if(!header||!value) return;
+
+      switch(header){
+        case 'Kategorie':
+          ctx.category = value; ctx.categoryURL = tr.querySelector('td a')?.href;
+          break;
+        case 'Záruka':
+          ctx.warranty = value; break;
+        case 'EAN':
+          ctx.EAN = value; break;
+        default:
+          ctx['parametr'+sanitizeParam(header)] = value;
+      }
+    });
+
+    const dur = performance.now()-start;
+    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'productDetail' });
+    return dur;
   }
 
-  /*─────────────── debug dump to console ───────────────────────*/
-  function dumpLog () {
-    console.log(JSON.stringify({
-      startedAt: timing.startedAt,
-      gtmDL: timing.gtmDL,
-      shoptetObj: timing.shoptetObj,
-      inlineDL: timing.inlineDL,
-      domCtx: timing.domCtx
-    }, null, 2));
+  function parseCart(){
+    const start = performance.now();
+
+    const cartRows = $$('table.cart-table tr.removeable');
+    ctx.cartItems = cartRows.map(tr=>{
+      const img = tr.querySelector('.cart-p-image img');
+      const nameLink = tr.querySelector('a.main-link');
+      const amtInput = tr.querySelector('input[name="amount"]');
+      const btns = $$('button.increase,button.decrease', tr);
+      if(amtInput){
+        ['change','input'].forEach(ev=>amtInput.addEventListener(ev,()=>{
+          item.amount = Number(amtInput.value);
+          BUS.emit('contextDOMupdate',{key:'cartItems',value:ctx.cartItems});
+        }));
+        btns.forEach(b=>b.addEventListener('click',()=>setTimeout(()=>{
+          item.amount = Number(amtInput.value);
+          BUS.emit('contextDOMupdate',{key:'cartItems',value:ctx.cartItems});
+        },0)));
+      }
+      const item={
+        code: tr.dataset.microSku,
+        url: nameLink?.href,
+        img: img?.src,
+        name: nameLink?.textContent.trim(),
+        availability: txt('.availability-label', tr),
+        availabilityTooltip: tr.querySelector('.availability-label')?.getAttribute('data-original-title')||'',
+        availabilityAmount: txt('.availability-amount', tr),
+        amount: Number(amtInput?.value)||1,
+        unitPrice: txt('[data-testid="cartItemPrice"]', tr),
+        totalPrice: txt('[data-testid="cartPrice"]', tr)
+      };
+      return item;
+    });
+
+    ctx.deliveryEstimate = txt('.delivery-time');
+    ctx.priceTotal = txt('[data-testid="recapFullPrice"]');
+    ctx.priceTotalNoWAT = txt('[data-testid="recapFullPriceNoVat"]');
+
+    const dur = performance.now()-start;
+    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'cart' });
+    return dur;
+  }
+
+  function parseBillingAndShipping(){
+    const start = performance.now();
+
+    // items
+    ctx.cartItems = $$('.cart-items .cart-item').map(ci=>({
+      url: ci.querySelector('a.main-link')?.href,
+      name: txt('.cart-item-name', ci),
+      amount: txt('.cart-item-amount', ci),
+      price: txt('.cart-item-price', ci)
+    }));
+
+    ctx.itemsPrice = txt('[data-testid="recapItemTotalPrice"]');
+
+    const bill = $('[data-testid="recapDeliveryMethod"]');
+    if(bill){
+      ctx.selectedBilling = bill.textContent.replace(/-?\s*[0-9\s]+[Kk][čČ].*/,'').trim();
+      ctx.billingPrice = txt('[data-testid="recapDeliveryMethod"] span');
+    }
+
+    const ship = bill?.nextElementSibling;
+    if(ship){
+      ctx.selectedShipping = ship.textContent.replace(/(ZDARMA|[0-9\s]+[Kk][čČ]).*/,'').trim();
+      ctx.shippingPrice = txt('[data-testid="recapDeliveryMethod"] + strong span');
+    }
+
+    ctx.priceTotal = txt('[data-testid="recapFullPrice"]');
+    ctx.priceTotalNoWAT = txt('[data-testid="recapFullPriceNoVat"]');
+
+    // listeners for option changes
+    ['order-billing-methods','order-shipping-methods'].forEach(id=>{
+      const box = $('#'+id);
+      if(box){ box.addEventListener('click',()=>setTimeout(parseBillingAndShipping,0),true); }
+    });
+
+    const dur = performance.now()-start;
+    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'billingAndShipping' });
+    return dur;
+  }
+
+  function parseCustomerDetails(){
+    const start = performance.now();
+    parseBillingAndShipping(); // items + prices are same structure
+
+    // contact fields + listeners
+    const bind = (name, sel, evt='input') => {
+      const el = $(sel);
+      if(!el) return;
+      ctx[name] = el.value;
+      el.addEventListener(evt,()=>{ ctx[name] = el.value; BUS.emit('contextDOMupdate',{key:name,value:ctx[name]}); });
+    };
+
+    bind('name','#billFullName');
+    bind('email','#email');
+    bind('phone','#phone');
+
+    const phoneSel = $('select.js-phone-code');
+    if(phoneSel){
+      ctx.phoneCode = phoneSel.selectedOptions[0]?.textContent.match(/\+\d+/)?.[0];
+      phoneSel.addEventListener('change',()=>{ ctx.phoneCode = phoneSel.selectedOptions[0]?.textContent.match(/\+\d+/)?.[0]; BUS.emit('contextDOMupdate',{key:'phoneCode',value:ctx.phoneCode}); });
+    }
+
+    ['billStreet','billCity','billZip','billCompany'].forEach(id=>bind(id,'#'+id));
+    const billCountryInput = $('#billCountryIdInput');
+    ctx.billCountryId = billCountryInput?.value;
+
+    // flags
+    const flags = {
+      anotherShipping:'#another-shipping',
+      noteActive:'#add-note',
+      doNotSendNewsletter:'#sendNewsletter',
+      setRegistration:'#set-registration'
+    };
+    Object.entries(flags).forEach(([k,sel])=>{
+      const cb = $(sel);
+      if(cb){
+        ctx[k] = cb.checked;
+        cb.addEventListener('change',()=>{ ctx[k]=cb.checked; BUS.emit('contextDOMupdate',{key:k,value:ctx[k]}); });
+      }
+    });
+
+    // delivery address (if visible)
+    ['deliveryFullName','deliveryStreet','deliveryCity','deliveryZip','deliveryCompany'].forEach(id=>bind(id,'#'+id));
+
+    // remark textarea
+    const remark = $('#remark');
+    if(remark){
+      ctx.remark = remark.value;
+      remark.addEventListener('input',()=>{ ctx.remark = remark.value; BUS.emit('contextDOMupdate',{key:'remark',value:ctx.remark}); });
+    }
+
+    const dur = performance.now()-start;
+    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'customerDetails' });
+    return dur;
+  }
+
+  // --------------  Kick‑off after DOM ready --------------
+  let domDur = 0;
+  function runDOM(){
+    switch(ctx.pageType){
+      case 'productDetail': domDur = parseProductDetail(); break;
+      case 'cart': domDur = parseCart(); break;
+      case 'billingAndShipping': domDur = parseBillingAndShipping(); break;
+      case 'customerDetails': domDur = parseCustomerDetails(); break;
+      default: /* nothing */;
+    }
+
+    // ---- console debug ----
+    console.group('%c[CTX] Snapshot','color:#0A0;font-weight:bold;');
+    console.table(ctx);
+    console.groupEnd();
+    console.info(`⏱️ DataLayer: ${Math.round(t1-t0)} ms   |   DOM: ${Math.round(domDur)} ms`);
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', runDOM, {once:true});
+  } else {
+    runDOM();
   }
 })();
