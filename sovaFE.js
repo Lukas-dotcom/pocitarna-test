@@ -1,416 +1,488 @@
-// =======================================================
-//  Shoptet – Front‑end Context Collector (pure JS)
-//  ---------------------------------------------------
-//  • Section 1  → reads the latest Shoptet object that
-//                 lives inside `window.dataLayer`.
-//  • Section 2  → scrapes the visible DOM according to
-//                 `pageType` and keeps it in sync.
-//  • Both parts fire hub events:
-//         –  `contextDataLayerReady`
-//         –  `contextDOMready`
-//    with a plain‑object snapshot of the collected data.
-//  • For dev/debug the script prints the snapshot and the
-//    time spent in each section to the console.
-// =======================================================
-
+/* =============================================================
+   contextFrontend_flat.js — FRONTEND context collector for Shoptet
+   - Pure JS, no deps. Flat structure except tables (arrays of rows).
+   - Emits bus events: contextDataLayerReady, contextDOMready, contextDOMupdate
+   - Measures how long DL/DOM parsing took and logs to console.
+   ============================================================= */
 (function initContextFrontend(){
-  // ----------  Small safe pub/sub BUS  ----------
-  const BUS = (function(){
-    const map = new Map();
-    return {
-      on(ev, fn){
-        const arr = map.get(ev) || [];
-        arr.push(fn); map.set(ev, arr);
-        return () => { const a = map.get(ev) || []; const i = a.indexOf(fn); if(i>-1){ a.splice(i,1); map.set(ev,a);} };
-      },
-      emit(ev, payload){ (map.get(ev)||[]).slice().forEach(fn=>{ try{ fn(payload); }catch(e){ console.error('[bus]',e);} }); }
+  // ===== BUS fallback (compatible with SOVA.bus if already present) =====
+  const SOVA = (window.SOVA = window.SOVA || {});
+  if (!SOVA.bus) {
+    const _map = new Map();
+    SOVA.bus = {
+      on(ev, fn){ const a=_map.get(ev)||[]; a.push(fn); _map.set(ev,a); return ()=>{ const b=_map.get(ev)||[]; const i=b.indexOf(fn); if(i>-1){ b.splice(i,1); _map.set(ev,b); } }; },
+      once(ev, fn){ const off=this.on(ev, (p)=>{ off(); try{ fn(p); }catch(e){ console.error(e); } }); return off; },
+      emit(ev, payload){ (_map.get(ev)||[]).slice().forEach(fn=>{ try{ fn(payload); }catch(e){ console.error('[bus handler]',e); } }); }
     };
-  })();
+  }
+  const bus = SOVA.bus;
 
-  // ----------  Helpers  ----------
-  const $  = (q, r=document) => r.querySelector(q);
-  const $$ = (q, r=document) => Array.from(r.querySelectorAll(q));
+  // ===== Utils =====
+  const $  = (q,root=document)=> root.querySelector(q);
+  const $$ = (q,root=document)=> Array.from(root.querySelectorAll(q));
+  const toNum = v => { if (v == null) return undefined; const n = Number(v); return Number.isFinite(n) ? n : undefined; };
+  const toInt = v => { if (v == null) return undefined; const n = parseInt(v,10); return Number.isNaN(n) ? undefined : n; };
+  const NBSP = ' '; // literal NBSP
+  const text = (el)=> (el?.textContent||'').replaceAll(NBSP,' ').trim();
+  const html = (el)=> el ? el.innerHTML.trim() : '';
+  const sanitizeId = s => String(s||'').replace(/[^A-Za-z0-9]/g,'');
+  const safeKey = raw => raw
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^A-Za-z0-9]+/g,'')
+    .replace(/^([0-9])/,'_$1');
 
-  const ctx = Object.create(null);
+  // ===== Global flat context holder =====
+  const ctx = Object.create(null); // flat; tables are arrays
 
-  const t0 = performance.now();
-
-  // =================================================
-  //  SECTION 1 – DATALAYER
-  // =================================================
-  function readDataLayer(){
-    const last = (window.dataLayer||[]).slice().reverse().find(o => o && o.shoptet);
-    if(!last){ return; }
-
-    const s = last.shoptet || {};
-
-    // --- simple scalars ---------------------------------
-    const pick = [
-      'pageType','currency','currencyInfoDecimalSeparator','currencyInfoExchangeRate',
-      'currencyInfoPriceDecimalPlaces','currencyInfoSymbol','language','projectId',
-      'trafficType'
-    ];
-    pick.forEach(k => ctx[k] = s[k]);
-
-    // --- cartInfo --------------------------------------
-    if(s.cartInfo){
-      const c = s.cartInfo;
-      Object.assign(ctx, {
-        cartInfoId: c.id,
-        cartInfoFreeShipping: c.freeShipping,
-        cartInfoLeftToFreeGiftFormatted: c.leftToFreeGiftFormatted,
-        cartInfoLeftToFreeGift: c.leftToFreeGift,
-        cartInfoFreeGift: c.freeGift,
-        cartInfoLeftToFreeShipping: c.leftToFreeShipping,
-        cartInfoLeftToFreeShippingFormatted: c.leftToFreeShippingformatted,
-        cartInfoDiscountCoupon: c.discountCoupon,
-        cartInfoNoBillingShippingPriceWithoutVat: c.noBillingShippingPriceWithoutVat,
-        cartInfoNoBillingShippingPriceWithVat: c.noBillingShippingPriceWithVat,
-        cartInfoNoBillingShippingPriceVat: c.noBillingShippingPriceVat,
-        cartInfoTaxMode: c.taxMode
-      });
-      // cart items array
-      ctx.cartItems = (c.items||[]).map(i=>({
-        code: i.code,
-        guid: i.guid,
-        priceId: i.priceId,
-        quantity: i.quantity,
-        priceWithVat: i.priceWithVat,
-        priceWithoutDiscount: i.priceWithoutDiscount,
-        itemId: i.itemId,
-        name: i.name,
-        weight: i.weight
-      }));
+  // ===== DataLayer reader (FLATTENED per spec) =====
+  function getLatestShoptetLayer(){
+    const dl = window.dataLayer || [];
+    for (let i = dl.length - 1; i >= 0; i--) {
+      const rec = dl[i];
+      if (rec && typeof rec === 'object' && rec.shoptet) return rec.shoptet;
     }
-
-    // --- customer --------------------------------------
-    if(s.customer){
-      const cu = s.customer;
-      Object.assign(ctx, {
-        customerGuid: cu.guid,
-        customerEmail: cu.email,
-        customerFullName: cu.fullName,
-        customerPriceRatio: cu.priceRatio,
-        customerPriceListId: cu.priceListId,
-        customerGroupId: cu.groupId,
-        customerRegistered: cu.registered,
-        customerMainAccount: cu.mainAccount
-      });
-    }
-
-    // --- product detail extras -------------------------
-    if(ctx.pageType === 'productDetail' && s.product){
-      const p = s.product;
-      Object.assign(ctx, {
-        productId: p.id,
-        productGuid: p.guid,
-        productHasVariants: p.hasVariants,
-        productCode: p.code,
-        productName: p.name,
-        productAppendix: p.appendix,
-        productWeight: p.weight,
-        productManufacturer: p.manufacturer,
-        productManufacturerGuid: p.manufacturerGuid,
-        productCurrentCategory: p.currentCategory,
-        productCurrentCategoryGuid: p.currentCategoryGuid,
-        productDefaultCategory: p.defaultCategory,
-        productDefaultCategoryGuid: p.defaultCategoryGuid,
-        productCurrency: p.currency,
-        productPriceWithVat: p.priceWithVat
-      });
-      ctx.productVariants = (p.variants||[]).map(v=>({
-        code:v.code, quantity:v.quantity, stockExt:v.stockExt, stockId:v.stockId
-      }));
-      ctx.stocks = (p.stocks||[]).map(s=>({id:s.id,title:s.title,isDeliveryPoint:s.isDeliveryPoint,visibleOnEshop:s.visibleOnEshop}));
-    }
+    return null;
   }
 
-  readDataLayer();
+  function buildDataLayerPatch(){
+    const sh = getLatestShoptetLayer() || {};
+    const out = {};
 
-  const t1 = performance.now();
-  BUS.emit('contextDataLayerReady', { snapshot:{...ctx}, duration:t1-t0 });
+    // Basic
+    out.pageType   = sh.pageType;
+    out.currency   = sh.currency;
+    out.language   = sh.language;
+    out.projectId  = sh.projectId;
 
-  // Re‑read DL when Shoptet internals update it
-  ['updateCartDataLayer','updateDataLayerCartInfo'].forEach(fnName => {
-    const orig = window[fnName];
-    if(typeof orig === 'function'){
-      window[fnName] = function patched(){
-        const r = orig.apply(this, arguments);
-        readDataLayer();
-        BUS.emit('contextDataLayerReady', { snapshot:{...ctx}, duration:0, via:fnName });
-        return r;
-      };
+    // currencyInfo -> flattened
+    const ci = sh.currencyInfo || {};
+    out.currencyInfoDecimalSeparator   = ci.decimalSeparator;
+    out.currencyInfoExchangeRate       = toNum(ci.exchangeRate);
+    out.currencyInfoPriceDecimalPlaces = toNum(ci.priceDecimalPlaces);
+    out.currencyInfoSymbol             = ci.symbol;
+
+    // cartInfo -> flattened
+    const c = sh.cartInfo || {};
+    out.cartInfoId             = c.id;
+    out.cartInfoFreeShipping   = !!c.freeShipping;
+    out.cartInfoFreeGift       = !!c.freeGift;
+    out.cartInfoDiscountCoupon = Array.isArray(c.discountCoupon) ? c.discountCoupon.slice() : c.discountCoupon;
+    out.cartInfoTaxMode        = c.taxMode;
+
+    if (c.leftToFreeGift){
+      out.cartInfoLeftToFreeGiftFormatted = c.leftToFreeGift.formattedPrice;
+      out.cartInfoLeftToFreeGift          = toNum(c.leftToFreeGift.priceLeft);
     }
-  });
-
-  // =================================================
-  //  SECTION 2 – DOM SCRAPERS (per pageType)
-  // =================================================
-
-  // -------------- utilities ----------------
-  const priceNum = txt => {
-    if(!txt) return undefined;
-    return Number(txt.replace(/\u00a0/g,' ').replace(/[^0-9,.-]/g,'').replace(',','.')) || undefined;
-  };
-  const txt = (sel,r=document) => $(sel,r)?.textContent.trim();
-
-  function sanitizeParam(name){
-    return name.normalize('NFD')
-               .replace(/[^\w\s]/g,'')
-               .replace(/\s+/g,'')
-               .replace(/^\d+/,'');
-  }
-
-  // -------------- PAGE PARSERS ----------------
-  function parseProductDetail(){
-    const start = performance.now();
-
-    // main price block
-    ctx.standardPrice   = txt('.p-final-price-wrapper .price-standard span');
-    ctx.priceSave       = txt('.p-final-price-wrapper .price-save');
-    ctx.finalPrice      = txt('.p-final-price-wrapper .price-final-holder');
-    ctx.additionalPrice = txt('.p-final-price-wrapper .price-additional');
-
-    // delivery date
-    ctx.deliveryEstimate = txt('.detail-parameters .delivery-time');
-
-    // amount input (with listeners for changes)
-    const amtInput = $('input[name="amount"][data-testid="cartAmount"]');
-    if(amtInput){
-      ctx.cartAmount = Number(amtInput.value);
-      ['change','input'].forEach(ev=>amtInput.addEventListener(ev,()=>{
-        ctx.cartAmount = Number(amtInput.value);
-        BUS.emit('contextDOMupdate',{ key:'cartAmount', value:ctx.cartAmount });
-      }));
-      // plus/minus buttons
-      $$('button[data-testid="increase"],button[data-testid="decrease"]').forEach(b=>
-        b.addEventListener('click',()=>setTimeout(()=>{
-          ctx.cartAmount = Number(amtInput.value);
-          BUS.emit('contextDOMupdate',{ key:'cartAmount', value:ctx.cartAmount });
-        },0)));
+    if (c.leftToFreeShipping){
+      out.cartInfoLeftToFreeShipping          = toNum(c.leftToFreeShipping.priceLeft);
+      out.cartInfoLeftToFreeShippingFormatted = c.leftToFreeShipping.formattedPrice;
+    }
+    if (c.getNoBillingShippingPrice){
+      out.cartInfoNoBillingShippingPriceVat        = toNum(c.getNoBillingShippingPrice.vat);
+      out.cartInfoNoBillingShippingPriceWithVat    = toNum(c.getNoBillingShippingPrice.withVat);
+      out.cartInfoNoBillingShippingPriceWithoutVat = toNum(c.getNoBillingShippingPrice.withoutVat);
     }
 
-    ctx.shortDescription = $('.p-short-description')?.innerHTML.trim();
-
-    // --- related + alternative products as tables ---
-    const grabProducts = (sel) => $$(sel+' .product').map(p=>{
-      const img = p.querySelector('a.image img');
-      const flags = $$('span.flag', p).map(f=>f.classList[1]||f.textContent.trim());
-      const priceStd = txt('.flags-extra .price-standard span', p) || txt('.price-standard span', p);
-      const priceSave = txt('.flags-extra .price-save', p) || txt('.price-save', p);
-      const finalPrice = txt('.price-final strong', p) || txt('.price.price-final strong', p);
-      const additionalPrice = txt('.price-additional', p);
-      const form = p.querySelector('form.pr-action');
-      return {
-        code: txt('.p-code span[data-micro="sku"]',p),
-        id: form?.querySelector('input[name="productId"]')?.value,
-        url: p.querySelector('a.image')?.href,
-        img: img?.src,
-        imgBig: img?.dataset.microImage,
-        flags,
-        name: txt('[data-testid="productCardName"]', p),
-        rating: Number(p.querySelector('.stars-wrapper')?.dataset.microRatingValue)||undefined,
-        availability: txt('.availability'),
-        availabilityTooltip: p.querySelector('.availability .show-tooltip')?.getAttribute('data-original-title')||'',
-        availabilityColor: p.querySelector('.availability span')?.style.color||'',
-        standardPrice: priceStd,
-        priceSave,
-        finalPrice,
-        additionalPrice,
-        priceId: form?.querySelector('input[name="priceId"]')?.value,
-        productId: form?.querySelector('input[name="productId"]')?.value,
-        csrf: form?.querySelector('input[name="__csrf__"]')?.value,
-        shortDescription: $('.p-desc', p)?.innerHTML.trim(),
-        warranty: p.querySelector('[data-micro-warranty]')?.getAttribute('data-micro-warranty')
-      };
-    });
-
-    ctx.relatedProducts    = grabProducts('.products-related');
-    ctx.alternativeProducts = grabProducts('.products-alternative');
-
-    // --- category table params ---------------------------
-    const tblRows = $$('.detail-parameters tr');
-    tblRows.forEach(tr=>{
-      const header = tr.querySelector('th .row-header-label')?.textContent.replace(':','').trim();
-      const value  = tr.querySelector('td')?.innerText.trim();
-      if(!header||!value) return;
-
-      switch(header){
-        case 'Kategorie':
-          ctx.category = value; ctx.categoryURL = tr.querySelector('td a')?.href;
-          break;
-        case 'Záruka':
-          ctx.warranty = value; break;
-        case 'EAN':
-          ctx.EAN = value; break;
-        default:
-          ctx['parametr'+sanitizeParam(header)] = value;
-      }
-    });
-
-    const dur = performance.now()-start;
-    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'productDetail' });
-    return dur;
-  }
-
-  function parseCart(){
-    const start = performance.now();
-
-    const cartRows = $$('table.cart-table tr.removeable');
-    ctx.cartItems = cartRows.map(tr=>{
-      const img = tr.querySelector('.cart-p-image img');
-      const nameLink = tr.querySelector('a.main-link');
-      const amtInput = tr.querySelector('input[name="amount"]');
-      const btns = $$('button.increase,button.decrease', tr);
-      if(amtInput){
-        ['change','input'].forEach(ev=>amtInput.addEventListener(ev,()=>{
-          item.amount = Number(amtInput.value);
-          BUS.emit('contextDOMupdate',{key:'cartItems',value:ctx.cartItems});
-        }));
-        btns.forEach(b=>b.addEventListener('click',()=>setTimeout(()=>{
-          item.amount = Number(amtInput.value);
-          BUS.emit('contextDOMupdate',{key:'cartItems',value:ctx.cartItems});
-        },0)));
-      }
-      const item={
-        code: tr.dataset.microSku,
-        url: nameLink?.href,
-        img: img?.src,
-        name: nameLink?.textContent.trim(),
-        availability: txt('.availability-label', tr),
-        availabilityTooltip: tr.querySelector('.availability-label')?.getAttribute('data-original-title')||'',
-        availabilityAmount: txt('.availability-amount', tr),
-        amount: Number(amtInput?.value)||1,
-        unitPrice: txt('[data-testid="cartItemPrice"]', tr),
-        totalPrice: txt('[data-testid="cartPrice"]', tr)
-      };
-      return item;
-    });
-
-    ctx.deliveryEstimate = txt('.delivery-time');
-    ctx.priceTotal = txt('[data-testid="recapFullPrice"]');
-    ctx.priceTotalNoWAT = txt('[data-testid="recapFullPriceNoVat"]');
-
-    const dur = performance.now()-start;
-    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'cart' });
-    return dur;
-  }
-
-  function parseBillingAndShipping(){
-    const start = performance.now();
-
-    // items
-    ctx.cartItems = $$('.cart-items .cart-item').map(ci=>({
-      url: ci.querySelector('a.main-link')?.href,
-      name: txt('.cart-item-name', ci),
-      amount: txt('.cart-item-amount', ci),
-      price: txt('.cart-item-price', ci)
+    // cartItems (prefer cartInfo.cartItems; fallback to sh.cart)
+    const rawItems = (Array.isArray(c.cartItems) && c.cartItems.length) ? c.cartItems : (Array.isArray(sh.cart) ? sh.cart : []);
+    out.cartItems = rawItems.map(it => ({
+      code: it.code,
+      guid: it.guid,
+      priceId: toInt(it.priceId),
+      quantity: toNum(it.quantity),
+      priceWithVat: toNum(it.priceWithVat),
+      priceWithoutDiscount: toNum(it.priceWithoutDiscount),
+      itemId: it.itemId,
+      name: it.name,
+      weight: toNum(it.weight)
     }));
 
-    ctx.itemsPrice = txt('[data-testid="recapItemTotalPrice"]');
+    // customer -> flattened
+    const cust = sh.customer || {};
+    out.customerGuid        = cust.guid;
+    out.customerEmail       = cust.email;
+    out.customerFullName    = cust.fullName;
+    out.customerPriceRatio  = toNum(cust.priceRatio);
+    out.customerPriceListId = toInt(cust.priceListId);
+    out.customerGroupId     = toInt(cust.groupId);
+    out.customerRegistered  = !!cust.registered;
+    out.customerMainAccount = !!cust.mainAccount;
 
-    const bill = $('[data-testid="recapDeliveryMethod"]');
-    if(bill){
-      ctx.selectedBilling = bill.textContent.replace(/-?\s*[0-9\s]+[Kk][čČ].*/,'').trim();
-      ctx.billingPrice = txt('[data-testid="recapDeliveryMethod"] span');
+    // traffic
+    out.trafficType = sh.traffic_type || sh.trafficType;
+
+    // product (only when on productDetail)
+    const p = sh.product || {};
+    if (sh.pageType === 'productDetail' && p){
+      out.productId                   = p.id;
+      out.productGuid                 = p.guid;
+      out.productHasVariants          = !!p.hasVariants;
+      out.productCode                 = Array.isArray(p.codes) && p.codes[0] ? p.codes[0].code : undefined;
+      out.productName                 = p.name;
+      out.productAppendix             = p.appendix;
+      out.productWeight               = toNum(p.weight);
+      out.productManufacturer         = p.manufacturer;
+      out.productManufacturerGuid     = p.manufacturerGuid;
+      out.productCurrentCategory      = p.currentCategory;
+      out.productCurrentCategoryGuid  = p.currentCategoryGuid;
+      out.productDefaultCategory      = p.defaultCategory;
+      out.productDefaultCategoryGuid  = p.defaultCategoryGuid;
+      out.productCurrency             = p.currency || sh.currency;
+      out.productPriceWithVat         = toNum(p.priceWithVat ?? p.priceWithVatMin ?? p.priceWithVatMax);
+
+      // productVariants table from product.codes (columns: code, quantity, stock<ID> for each stock id)
+      out.productVariants = Array.isArray(p.codes) ? p.codes.map(row => {
+        const r = { code: row.code, quantity: toNum(row.quantity) };
+        (row.stocks || []).forEach(s => { const key = 'stock' + sanitizeId(s.id || ''); r[key] = toNum(s.quantity); });
+        return r;
+      }) : [];
+
+      // stocks table from sh.stocks (id,title,isDeliveryPoint,visibleOnEshop)
+      out.stocks = Array.isArray(sh.stocks) ? sh.stocks.map(s => ({
+        id: s.id,
+        title: s.title,
+        isDeliveryPoint: !!s.isDeliveryPoint,
+        visibleOnEshop: !!s.visibleOnEshop
+      })) : [];
     }
 
-    const ship = bill?.nextElementSibling;
-    if(ship){
-      ctx.selectedShipping = ship.textContent.replace(/(ZDARMA|[0-9\s]+[Kk][čČ]).*/,'').trim();
-      ctx.shippingPrice = txt('[data-testid="recapDeliveryMethod"] + strong span');
+    return out;
+  }
+
+  function readDataLayer(){
+    const t0 = performance.now();
+    const patch = buildDataLayerPatch();
+    Object.assign(ctx, patch);
+    const took = performance.now() - t0;
+    try { bus.emit('contextDataLayerReady', { snapshot: { ...ctx }, tookMs: took }); } catch(e){}
+    return took;
+  }
+
+  // Re-run DL on Shoptet updates
+  function hook(path, after){
+    try {
+      const parts = path.split('.');
+      let host = window[parts[0]];
+      for (let i=1;i<parts.length-1;i++){ if (!host) return; host = host[parts[i]]; }
+      const name = parts[parts.length-1];
+      if (!host || !host[name] || host[name].__hooked) return;
+      const orig = host[name];
+      const wrap = function(){ const r = orig.apply(this, arguments); try{ after(); }catch(e){} return r; };
+      wrap.__hooked = true;
+      host[name] = wrap;
+    } catch(e){}
+  }
+  const rerunDL = ()=> queueMicrotask(readDataLayer);
+  hook('shoptet.tracking.updateDataLayerCartInfo', rerunDL);
+  hook('shoptet.tracking.updateCartDataLayer', rerunDL);
+  document.addEventListener('ShoptetDataLayerUpdated', rerunDL, true);
+
+  // Initial DL read
+  const dlMs = readDataLayer();
+
+  // ===== DOM reader (unchanged spec-complete) =====
+  function parsePrices_Product(){
+    const root = $('.p-final-price-wrapper');
+    return {
+      standardPrice : text(root?.querySelector('.price-standard span')) || undefined,
+      priceSave     : text(root?.querySelector('.price-save')) || undefined,
+      finalPrice    : text(root?.querySelector('.price-final [data-testid="productCardPrice"], .price-final strong') || root?.querySelector('.price.price-final strong')) || undefined,
+      additionalPrice: text(root?.querySelector('.price-additional')) || undefined,
+    };
+  }
+
+  function parseDeliveryEstimate_Product(){
+    const d = $('.detail-parameters .delivery-time [data-testid="deliveryTime"] .show-tooltip, .detail-parameters .delivery-time [data-testid="deliveryTime"], .detail-parameters .delivery-time');
+    return { deliveryEstimate: text(d) || undefined };
+  }
+
+  function readCartAmount_Product(root=document){
+    const input = root.querySelector('input.amount[data-testid="cartAmount"], input.amount[name="amount"]');
+    return input ? toInt(input.value) : undefined;
+  }
+
+  function parseShortDescription_Product(){
+    const el = $('.p-short-description [data-testid="productCardShortDescr"], .p-short-description');
+    return { shortDescription: html(el) };
+  }
+
+  function parseProductList(containerSel){
+    const out = [];
+    $$(containerSel + ' .product').forEach(card => {
+      const p = card.querySelector('.p');
+      const data = {};
+      data.code = text(card.querySelector('.p-code [data-micro="sku"]')) || undefined;
+      data.id   = p?.getAttribute('data-micro-product-id') || undefined;
+      const aImg= card.querySelector('a.image');
+      data.url  = aImg?.getAttribute('href') || undefined;
+      const img = aImg?.querySelector('img');
+      data.img  = img?.getAttribute('src') || undefined;
+      data.imgBig = img?.getAttribute('data-micro-image') || undefined;
+      data.flags = $$('.flags span.flag', card).map(s=> s.className.split(/\s+/).find(c=>c.startsWith('flag-'))).filter(Boolean);
+      data.name = text(card.querySelector('[data-testid="productCardName"]')) || undefined;
+      const starsWrap = card.querySelector('.stars-wrapper');
+      data.rating = starsWrap ? toNum(starsWrap.getAttribute('data-micro-rating-value')) : undefined;
+      const av = card.querySelector('.availability');
+      const avSpan = av?.querySelector('.show-tooltip');
+      data.availability = text(avSpan) || undefined;
+      data.availabilityTooltip = avSpan?.getAttribute('data-original-title') || '';
+      const color = (avSpan?.getAttribute('style')||'').match(/color\s*:\s*([^;]+)/i);
+      data.availabilityColor = color ? color[1].trim() : '';
+
+      // Prices
+      data.standardPrice  = text(card.querySelector('.flags .price-standard span')) || undefined;
+      data.priceSave      = text(card.querySelector('.flags .price-save')) || undefined;
+      data.finalPrice     = text(card.querySelector('.price.price-final strong')) || undefined;
+      data.additionalPrice= html(card.querySelector('.price-additional')) || undefined;
+
+      // Hidden form fields
+      data.priceId   = toInt(card.querySelector('input[name="priceId"]')?.value);
+      data.productId = toInt(card.querySelector('input[name="productId"]')?.value) || toInt(data.id);
+      data.csrf      = card.querySelector('input[name="__csrf__"]')?.value || '';
+
+      // Short descr + warranty
+      data.shortDescription = html(card.querySelector('[data-testid="productCardShortDescr"]')) || '';
+      const offer = card.querySelector('[data-micro="offer"]');
+      data.warranty = offer?.getAttribute('data-micro-warranty') || '';
+
+      out.push(data);
+    });
+    return out;
+  }
+
+  function parseDetailParameters(){
+    const tbl = $('.detail-parameters');
+    const result = {};
+    if (!tbl) return result;
+
+    // Kategorie + URL
+    const catRow = Array.from(tbl.querySelectorAll('tr')).find(tr=>/Kategorie/i.test(tr.innerText));
+    if (catRow){
+      const a = catRow.querySelector('a[href]');
+      result.category = text(a) || undefined;
+      result.categoryURL = a?.getAttribute('href') || undefined;
     }
 
-    ctx.priceTotal = txt('[data-testid="recapFullPrice"]');
-    ctx.priceTotalNoWAT = txt('[data-testid="recapFullPriceNoVat"]');
+    // Záruka
+    const warrRow = Array.from(tbl.querySelectorAll('tr')).find(tr=>/Z[aá]ruka/i.test(tr.innerText));
+    if (warrRow) result.warranty = text(warrRow.querySelector('td')) || undefined;
 
-    // listeners for option changes
-    ['order-billing-methods','order-shipping-methods'].forEach(id=>{
-      const box = $('#'+id);
-      if(box){ box.addEventListener('click',()=>setTimeout(parseBillingAndShipping,0),true); }
+    // EAN
+    const eanRow = tbl.querySelector('.productEan');
+    if (eanRow) result.EAN = text(eanRow.querySelector('.productEan__value')) || undefined;
+
+    // Ostatní parametry -> flat key/value
+    Array.from(tbl.querySelectorAll('tr')).forEach(tr=>{
+      const th = text(tr.querySelector('th'));
+      const td = tr.querySelector('td');
+      if (!th || !td) return;
+      if (/Kategorie|Z[aá]ruka|EAN/i.test(th)) return; // already handled
+      const key = 'parametr' + safeKey(th);
+      let val = td.querySelector('a[href]') ? text(td.querySelector('a[href]')) : text(td);
+      result[key] = val || undefined;
     });
 
-    const dur = performance.now()-start;
-    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'billingAndShipping' });
-    return dur;
+    return result;
   }
 
-  function parseCustomerDetails(){
-    const start = performance.now();
-    parseBillingAndShipping(); // items + prices are same structure
-
-    // contact fields + listeners
-    const bind = (name, sel, evt='input') => {
-      const el = $(sel);
-      if(!el) return;
-      ctx[name] = el.value;
-      el.addEventListener(evt,()=>{ ctx[name] = el.value; BUS.emit('contextDOMupdate',{key:name,value:ctx[name]}); });
-    };
-
-    bind('name','#billFullName');
-    bind('email','#email');
-    bind('phone','#phone');
-
-    const phoneSel = $('select.js-phone-code');
-    if(phoneSel){
-      ctx.phoneCode = phoneSel.selectedOptions[0]?.textContent.match(/\+\d+/)?.[0];
-      phoneSel.addEventListener('change',()=>{ ctx.phoneCode = phoneSel.selectedOptions[0]?.textContent.match(/\+\d+/)?.[0]; BUS.emit('contextDOMupdate',{key:'phoneCode',value:ctx.phoneCode}); });
-    }
-
-    ['billStreet','billCity','billZip','billCompany'].forEach(id=>bind(id,'#'+id));
-    const billCountryInput = $('#billCountryIdInput');
-    ctx.billCountryId = billCountryInput?.value;
-
-    // flags
-    const flags = {
-      anotherShipping:'#another-shipping',
-      noteActive:'#add-note',
-      doNotSendNewsletter:'#sendNewsletter',
-      setRegistration:'#set-registration'
-    };
-    Object.entries(flags).forEach(([k,sel])=>{
-      const cb = $(sel);
-      if(cb){
-        ctx[k] = cb.checked;
-        cb.addEventListener('change',()=>{ ctx[k]=cb.checked; BUS.emit('contextDOMupdate',{key:k,value:ctx[k]}); });
-      }
+  // CART page readers
+  function parseCartTable(){
+    const rows = $$('.cart-table tbody tr.removeable');
+    return rows.map(tr=>{
+      const code = tr.getAttribute('data-micro-sku') || undefined;
+      const a = tr.querySelector('.p-name a.main-link');
+      const img = tr.querySelector('.cart-p-image img');
+      const avLabel = tr.querySelector('.p-availability .availability-label.show-tooltip');
+      const amountInput = tr.querySelector('input.amount[data-testid="cartAmount"]');
+      return {
+        code,
+        URL: a?.getAttribute('href') || undefined,
+        IMG: img?.getAttribute('src') || undefined,
+        name: text(a) || undefined,
+        availability: text(avLabel) || undefined,
+        availabilityTooltip: avLabel?.getAttribute('data-original-title') || '',
+        availabilityAmount: text(tr.querySelector('[data-testid="numberAvailabilityAmount"]')) || undefined,
+        amount: amountInput ? toInt(amountInput.value) : undefined,
+        unitPrice: text(tr.querySelector('[data-testid="cartItemPrice"]')) || undefined,
+        totalPrice: text(tr.querySelector('[data-testid="cartPrice"]')) || undefined,
+      };
     });
+  }
 
-    // delivery address (if visible)
-    ['deliveryFullName','deliveryStreet','deliveryCity','deliveryZip','deliveryCompany'].forEach(id=>bind(id,'#'+id));
+  function parseCartTotals(){
+    return {
+      deliveryEstimate: text($('.delivery-time [data-testid="deliveryTime"] strong, .delivery-time [data-testid="deliveryTime"], .delivery-time strong')) || undefined,
+      priceTotal: text($('[data-testid="recapFullPrice"]')) || undefined,
+      priceTotalNoWAT: text($('[data-testid="recapFullPriceNoVat"]')) || undefined,
+    };
+  }
 
-    // remark textarea
-    const remark = $('#remark');
-    if(remark){
-      ctx.remark = remark.value;
-      remark.addEventListener('input',()=>{ ctx.remark = remark.value; BUS.emit('contextDOMupdate',{key:'remark',value:ctx.remark}); });
+  // BILLING & SHIPPING page readers
+  function parseCheckoutRecapItems(){
+    const items = [];
+    $$('.cart-items [data-testid="recapCartItem"]').forEach(ci=>{
+      const a = ci.querySelector('[data-testid="cartProductName"]');
+      items.push({
+        URL: a?.getAttribute('href') || undefined,
+        name: text(a) || undefined,
+        amount: (text(ci.querySelector('[data-testid="recapItemAmount"]')) || '').replace(/\s+/g,' ').trim(),
+        price: text(ci.querySelector('[data-testid="recapItemPrice"]')) || undefined,
+      });
+    });
+    return items;
+  }
+
+  function parseCheckoutSelectedMethods(){
+    const billEl = $('[data-testid="paymentMethods"] ~ .recapitulation-shipping-billing-info, [data-testid="recapDeliveryMethod"]');
+    const shipEl = billEl?.parentElement?.querySelectorAll('.recapitulation-shipping-billing-info')[1] ||
+                   $$('[data-testid="recapDeliveryMethod"]').slice(-1)[0];
+    const billPrice = billEl?.querySelector('[data-testid="recapItemPrice"]');
+    const shipPrice = shipEl?.querySelector('[data-testid="recapItemPrice"]');
+    return {
+      selectedBilling: billEl ? billEl.childNodes[billEl.childNodes.length-1]?.textContent?.trim() : undefined,
+      billingPrice: text(billPrice) || undefined,
+      selectedShipping: shipEl ? shipEl.childNodes[shipEl.childNodes.length-1]?.textContent?.trim() : undefined,
+      shippingPrice: text(shipPrice) || undefined,
+    };
+  }
+
+  function parseCheckoutTotals(){
+    return {
+      priceTotal: text($('div.price-wrapper [data-testid="recapFullPrice"]')) || undefined,
+      priceTotalNoWAT: text($('div.price-wrapper [data-testid="recapFullPriceNoVat"]')) || undefined,
+    };
+  }
+
+  function parseContactAndAddresses(){
+    const out = {};
+    // Contact
+    out.name  = $('#billFullName')?.value || '';
+    out.email = $('#email')?.value || '';
+    out.phone = $('#phone')?.value || '';
+    const phSel = $('select.js-phone-code');
+    if (phSel){
+      const opt = phSel.querySelector('option:checked');
+      try { const data = JSON.parse(opt?.value || '{}'); out.phoneCode = data.phoneCode || ''; } catch{ out.phoneCode = ''; }
     }
 
-    const dur = performance.now()-start;
-    BUS.emit('contextDOMready', { snapshot:{...ctx}, duration:dur, page:'customerDetails' });
-    return dur;
+    // Billing address
+    out.billStreet = $('#billStreet')?.value || '';
+    out.billCity   = $('#billCity')?.value || '';
+    out.billZip    = $('#billZip')?.value || '';
+    out.billCountryId = $('#billCountryIdInput')?.value || $('#billCountryId')?.value || '';
+
+    // anotherShipping
+    out.anotherShipping = !!$('#another-shipping')?.checked;
+
+    // Delivery address
+    out.deliveryFullName = $('#deliveryFullName')?.value || '';
+    out.deliveryStreet   = $('#deliveryStreet')?.value || '';
+    out.deliveryCity     = $('#deliveryCity')?.value || '';
+    out.deliveryZip      = $('#deliveryZip')?.value || '';
+    out.deliveryCompany  = $('#deliveryCompany')?.value || '';
+
+    // Extras
+    out.noteActive          = !!$('#add-note')?.checked;
+    out.doNotSendNewsletter = !!$('#sendNewsletter')?.checked;
+    out.setRegistration     = !!$('#set-registration')?.checked;
+    out.remark              = $('#remark')?.value || '';
+
+    return out;
   }
 
-  // --------------  Kick‑off after DOM ready --------------
-  let domDur = 0;
-  function runDOM(){
-    switch(ctx.pageType){
-      case 'productDetail': domDur = parseProductDetail(); break;
-      case 'cart': domDur = parseCart(); break;
-      case 'billingAndShipping': domDur = parseBillingAndShipping(); break;
-      case 'customerDetails': domDur = parseCustomerDetails(); break;
-      default: /* nothing */;
+  function attachProductDOMListeners(){
+    const qty = document.querySelector('input.amount[data-testid="cartAmount"]');
+    const inc = document.querySelector('button[data-testid="increase"]');
+    const dec = document.querySelector('button[data-testid="decrease"]');
+    const fire = ()=> emitDOMUpdate({ cartAmount: readCartAmount_Product() });
+    if (qty){ qty.addEventListener('input', fire, true); }
+    if (inc){ inc.addEventListener('click', ()=> setTimeout(fire,0), true); }
+    if (dec){ dec.addEventListener('click', ()=> setTimeout(fire,0), true); }
+  }
+
+  function attachCartDOMListeners(){
+    $$('.cart-table tbody tr.removeable').forEach(tr=>{
+      const qty = tr.querySelector('input.amount[data-testid="cartAmount"]');
+      const inc = tr.querySelector('button[data-testid="increase"]');
+      const dec = tr.querySelector('button[data-testid="decrease"]');
+      const fire = ()=> emitDOMUpdate({ cartItemsDOM: parseCartTable(), ...parseCartTotals() });
+      if (qty){ qty.addEventListener('input', fire, true); }
+      if (inc){ inc.addEventListener('click', ()=> setTimeout(fire,0), true); }
+      if (dec){ dec.addEventListener('click', ()=> setTimeout(fire,0), true); }
+    });
+  }
+
+  function attachCheckoutDOMListeners(){
+    const payWrap = $('#order-billing-methods');
+    const shipWrap= $('#order-shipping-methods');
+    const fire = ()=> emitDOMUpdate({
+      cartItemsCheckout: parseCheckoutRecapItems(),
+      ...parseCheckoutSelectedMethods(),
+      ...parseCheckoutTotals(),
+      ...parseContactAndAddresses(),
+    });
+    if (payWrap){ payWrap.addEventListener('click', ()=> setTimeout(fire,0), true); }
+    if (shipWrap){ shipWrap.addEventListener('click', ()=> setTimeout(fire,0), true); }
+
+    // Contact + addresses
+    document.addEventListener('input', e=>{ if(e.target.closest('.co-contact-information, .co-shipping-address, .header-billing, #note')) fire(); }, true);
+    document.addEventListener('change', e=>{ if(e.target.closest('.co-contact-information, .co-shipping-address, .header-billing, #note')) fire(); }, true);
+  }
+
+  function emitDOMReady(payload){ try{ bus.emit('contextDOMready', payload);}catch(e){} }
+  function emitDOMUpdate(payload){ try{ bus.emit('contextDOMupdate', payload);}catch(e){} }
+
+  function readDOM(){
+    const t0 = performance.now();
+    const page = ctx.pageType || (document.body?.className?.match(/page-(\w+)/)?.[1]);
+    const patch = {};
+
+    if (page === 'productDetail'){
+      Object.assign(patch, parsePrices_Product());
+      Object.assign(patch, parseDeliveryEstimate_Product());
+      patch.cartAmount = readCartAmount_Product();
+      Object.assign(patch, parseShortDescription_Product());
+      patch.relatedProducts    = parseProductList('.products-related');
+      patch.alternativeProducts= parseProductList('.products-alternative');
+      Object.assign(patch, parseDetailParameters());
+
+      attachProductDOMListeners();
     }
 
-    // ---- console debug ----
-    console.group('%c[CTX] Snapshot','color:#0A0;font-weight:bold;');
-    console.table(ctx);
-    console.groupEnd();
-    console.info(`⏱️ DataLayer: ${Math.round(t1-t0)} ms   |   DOM: ${Math.round(domDur)} ms`);
+    if (page === 'cart'){
+      patch.cartItems = parseCartTable();
+      Object.assign(patch, parseCartTotals());
+      attachCartDOMListeners();
+    }
+
+    if (page === 'billingAndShipping'){
+      patch.cartItems = parseCheckoutRecapItems();
+      Object.assign(patch, parseCheckoutSelectedMethods());
+      Object.assign(patch, parseCheckoutTotals());
+      attachCheckoutDOMListeners();
+    }
+
+    if (page === 'customerDetails'){
+      patch.cartItems = parseCheckoutRecapItems();
+      Object.assign(patch, parseCheckoutTotals());
+      Object.assign(patch, parseCheckoutSelectedMethods());
+      Object.assign(patch, parseContactAndAddresses());
+      attachCheckoutDOMListeners();
+    }
+
+    Object.assign(ctx, patch);
+
+    const took = performance.now() - t0;
+    emitDOMReady({ snapshot: { ...ctx }, tookMs: took });
+    return took;
   }
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', runDOM, {once:true});
-  } else {
-    runDOM();
-  }
+
+  const domMs = readDOM();
+
+  // ===== Dev: dump & timings =====
+  try {
+    console.info('[contextFrontend] DataLayer parsed in %d ms', Math.round(dlMs));
+    console.info('[contextFrontend] DOM parsed in %d ms', Math.round(domMs));
+    console.log('[contextFrontend] snapshot', { ...ctx });
+  } catch(e){}
 })();
