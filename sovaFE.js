@@ -1,245 +1,221 @@
-// === SOVA Context Extractor – FRONTEND =====================================================
-// 🛠️  drop this <script> anywhere in Shoptet HTML editor (e.g. "Kódy třetích stran")
-//      – no external deps, pure ES2015+ –
-//      – collects context ASAP, keeps it in‑sync and emits events over SOVA.bus –
-// -----------------------------------------------------------------------------
-// 1)  Context from *dataLayer* & *shoptet* globals  (section ID: ctxDL)
-// 2)  Context from DOM (page‑type specific)        (section ID: ctxDOM)
-// 3)  Benchmarks (t = ms since scriptStart)        (section ID: meta)
-// -----------------------------------------------------------------------------
-//  Emits once both sections are ready:      bus.emit('contextDataLayerReady' , ctxDL )
-//                                           bus.emit('contextDOMready'       , ctxDOM)
-//  Always emits diff on any change:         bus.emit('context:update'        , {snapshot,changedKeys,reason})
-// ============================================================================
-(function(){
-  const SCRIPT_START = performance.now();
+// === Context collector for Shoptet frontend – v2 ===
+// collects (1) dataLayer / shoptet object   (2) DOM‑only data
+// then emits:   contextDataLayerReady   &   contextDOMready
+// finally dumps timing + snapshots to console for quick verification
 
-  /* ---------------------------------------------------------------------- *
-   *  MICRO BUS  (very small pub/sub – identical to admin‑side helper)      *
-   * ---------------------------------------------------------------------- */
-  const SOVA = (window.SOVA = window.SOVA || {});
-  if(!SOVA.bus){
-    const map=new Map();
-    SOVA.bus={
-      on(ev,fn){const l=map.get(ev)||[];l.push(fn);map.set(ev,l);return()=>{const a=map.get(ev)||[];a.splice(a.indexOf(fn),1);} },
-      once(ev,fn){const off=this.on(ev,p=>{off();fn(p)});return off},
-      emit(ev,p){(map.get(ev)||[]).slice().forEach(fn=>{try{fn(p)}catch(e){console.error(e)})})
-    };
+(function () {
+  "use strict";
+
+  /*─────────────────────────── helpers ───────────────────────────*/
+  const $  = (q, root = document) => root.querySelector(q);
+  const $$ = (q, root = document) => Array.from(root.querySelectorAll(q));
+  const txt = (el) => (el ? el.textContent.replace(/\u00A0/g, " ").trim() : "");
+  const num = (s) => {
+    const n = parseFloat(String(s).replace(/[\s\u00A0]/g, "").replace(/,/g, "."));
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const stripCur = (s) => s.replace(/[€£$]|Kč|CZK|EUR|USD/gi, "");
+  const getMs = (start) => Math.round((performance.now() - start) * 10) / 10;
+
+  /*──────────────────────── timing ───────────────────────────────*/
+  const startedAt = performance.now();
+  const timing = {
+    startedAt: 0,            // always 0 (start reference)
+    gtmDL:   { ready: false, t: null, data: null },
+    shoptetObj: { ready: false, t: null, data: null },
+    inlineDL:  { ready: false, t: null, data: null },
+    domCtx:    { ready: false, t: null, data: null }
+  };
+
+  /*──────────────────── section 1 – dataLayer ───────────────────*/
+  function readInlineDL () {
+    try {
+      const inline = document.querySelectorAll("script");
+      for (const s of inline) {
+        if (!s.textContent.includes("dataLayer = []")) continue;
+        const m = s.textContent.match(/dataLayer\.push\((\{[\s\S]+?\})\)/);
+        if (!m) continue;
+        // eslint-disable-next-line no-new-func
+        const obj = Function("return " + m[1])();
+        return obj.shoptet?.customer ? obj.shoptet : null;
+      }
+    } catch (_) {}
+    return null;
   }
-  const bus=SOVA.bus;
 
-  /* ---------------------------------------------------------------------- *
-   *  HELPERS                                                              *
-   * ---------------------------------------------------------------------- */
-  const $  =(sel,root=document)=>root.querySelector(sel);
-  const $$ =(sel,root=document)=>Array.from(root.querySelectorAll(sel));
-  const txt = el=>el?.textContent.trim()||'';
-  const money = el=>{if(!el)return undefined;const s=txt(el).replace(/\u00a0/g,' ').replace(/[€£$]|Kč|CZK/gi,'');return Number(s.replace(/[^\d,.-]/g,'').replace(',','.'))||undefined};
-  const now = ()=>Math.round(performance.now()-SCRIPT_START);
+  function finishInlineDL (data) {
+    timing.inlineDL.ready = true;
+    timing.inlineDL.t     = getMs(startedAt);
+    timing.inlineDL.data  = data;
+    maybeFireDLReady();
+  }
 
-  /* ---------------------------------------------------------------------- *
-   *  STATE  +  diff / notify                                              *
-   * ---------------------------------------------------------------------- */
-  const state  = Object.create(null);        // flat KV snapshot
-  const dirty  = new Set();                  // keys scheduled to recalc
-  const lenses = new Map();                  // id -> fn(root) => patch
-  const listeners=new Set();
-  let scheduled=false;
+  const inlineData = readInlineDL();
+  if (inlineData) finishInlineDL(inlineData);
 
-  const onUpdate  = fn=>{listeners.add(fn);return()=>listeners.delete(fn)};
-  const snapshot  = ()=>({...state});
-  const patchKeys = (patch,reason)=>{
-    const changed=new Set();
-    for(const [k,v] of Object.entries(patch||{})){
-      if(state[k]!==v){state[k]=v;changed.add(k);} }
-    if(!changed.size)return;
-    const snap=snapshot();
-    listeners.forEach(fn=>fn({snapshot:snap,changedKeys:changed,reason}));
-    bus.emit('context:update',{snapshot:snap,changedKeys:[...changed],reason});
-  };
-  const schedule = (id,reason)=>{dirty.add(id);if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{
-    scheduled=false;const reasonTag=reason||'scheduled';
-    dirty.forEach(id=>{dirty.delete(id);const fn=lenses.get(id);if(fn){try{patchKeys(fn(),`lens:${id}:${reasonTag}`);}catch(e){console.error(e);}}});
-  });};
+  // ── wait for window.dataLayer push with customer info ──
+  function hookDataLayer () {
+    if (!window.dataLayer) window.dataLayer = [];
+    const origPush = window.dataLayer.push;
+    window.dataLayer.push = function (...args) {
+      const res = origPush.apply(this, args);
+      scanDataLayer();
+      return res;
+    };
+    scanDataLayer();
+  }
+  hookDataLayer();
 
-  /* ---------------------------------------------------------------------- *
-   *  SECTION 1 – inline <script> dataLayer push + window.dataLayer         *
-   * ---------------------------------------------------------------------- */
-  (function initDataLayer(){
-    const LENS_ID='ctxDL';
-    function extract(){
-      const out={};
-      // try inline first object – walk dataLayer array until we find shoptet obj
-      const dl=window.dataLayer||[];
-      const first=dl.find(o=>o && o.shoptet);
-      if(first?.shoptet){ mergeShoptet(first.shoptet,out); }
-      // fallback: window.shoptet object (tiny customer subset)
-      if(window.shoptet?.customer){ out.customerGuid=window.shoptet.customer.guid; out.customerEmail=window.shoptet.customer.email; }
-      return out;
+  function scanDataLayer () {
+    const dlItem = window.dataLayer.find((o) => o && o.shoptet && o.shoptet.customer);
+    if (dlItem && !timing.gtmDL.ready) {
+      timing.gtmDL.ready = true;
+      timing.gtmDL.t     = getMs(startedAt);
+      timing.gtmDL.data  = dlItem.shoptet.customer;
+      maybeFireDLReady();
     }
-    function mergeShoptet(src,tgt){
-      const s=src||{};
-      tgt.pageType=s.pageType;
-      tgt.currency=s.currency;
-      tgt.language=s.language;
-      tgt.projectId=s.projectId;
-      // customer
-      if(s.customer){Object.assign(tgt,{
-        customerGuid:s.customer.guid,
-        customerEmail:s.customer.email,
-        customerFullName:s.customer.fullName,
-        customerPriceRatio:s.customer.priceRatio,
-        customerPriceListId:s.customer.priceListId,
-        customerGroupId:s.customer.groupId,
-        customerRegistered:s.customer.registered,
-        customerMainAccount:s.customer.mainAccount});}
-      // cartInfo (flattened few essentials)
-      if(s.cartInfo){Object.assign(tgt,{
-        cartInfoId:s.cartInfo.id,
-        cartInfoFreeShipping:s.cartInfo.freeShipping,
-        cartInfoTaxMode:s.cartInfo.taxMode});}
+  }
+
+  // ── shoptet object on window (async) ──
+  function pollShoptetObj () {
+    if (timing.shoptetObj.ready) return;
+    if (window.shoptet && window.shoptet.customer) {
+      timing.shoptetObj.ready = true;
+      timing.shoptetObj.t     = getMs(startedAt);
+      timing.shoptetObj.data  = window.shoptet.customer;
+      maybeFireDLReady();
+    } else {
+      requestAnimationFrame(pollShoptetObj);
     }
+  }
+  pollShoptetObj();
 
-    // initial read ASAP (inline script already ran) ----------------
-    lenses.set(LENS_ID,()=>({
-      tDL: now(),
-      ...extract()
-    }));
-    schedule(LENS_ID,'init');
-
-    // hook dataLayer.push for runtime updates ----------------------
-    const origPush = (window.dataLayer||[]).push.bind(window.dataLayer);
-    window.dataLayer.push=function(...args){ const r=origPush(...args); if(args.some(o=>o&&o.shoptet)){ schedule(LENS_ID,'push'); } return r; };
-
-    // notify once ready (first successful read) --------------------
-    onUpdate(({changedKeys})=>{ if(changedKeys.has('tDL')) bus.emit('contextDataLayerReady', snapshot()); });
-  })();
-
-  /* ---------------------------------------------------------------------- *
-   *  SECTION 2 – page‑type specific DOM scraping                           *
-   * ---------------------------------------------------------------------- */
-  (function initDOM(){
-    const LENS_ID='ctxDOM';
-    function extract(){
-      const out={ tDOM: now() };
-      const pType=state.pageType || $('body').dataset.pageType || '';
-
-      if(pType==='productDetail'){ Object.assign(out, scrapeProductDetail()); }
-      else if(pType==='cart'){    Object.assign(out, scrapeCart()); }
-      else if(pType==='checkout/shippingBilling') { Object.assign(out, scrapeBillingShipping()); }
-      else if(pType==='checkout/customer'){ Object.assign(out, scrapeCustomerDetails()); }
-      // others can be added here …
-      return out;
+  /*──────── emit BUS event after both dataLayer & shoptetObj ─────*/
+  function maybeFireDLReady () {
+    if (timing.inlineDL.ready && timing.shoptetObj.ready && timing.gtmDL.ready) {
+      if (maybeFireDLReady.done) return; // once
+      maybeFireDLReady.done = true;
+      window.dispatchEvent(new CustomEvent("contextDataLayerReady", { detail: {
+        inline: timing.inlineDL.data,
+        shoptet: timing.shoptetObj.data,
+        gtm: timing.gtmDL.data,
+        t: timing.gtmDL.t
+      }}));
     }
+  }
 
-    /* ---- PRODUCT DETAIL ------------------------------------------------ */
-    function scrapeProductDetail(){
-      const out={};
-      // prices -----------------------------------------------------------
-      out.standardPrice = money($('.price-standard span'));
-      out.priceSave     = txt($('.price-save')) || undefined;
-      out.finalPrice    = money($('.price-final strong'));
-      out.additionalPrice = money($('.price-additional'));
+  /*────────────────── section 2 – DOM parsing ───────────────────*/
+  const domCtx = {};
+  function readDomCtx () {
+    const pageType = timing.inlineDL.data?.pageType || window.shoptet?.pageType || "";
+    if (pageType !== "productDetail") return; // only PD for now
 
-      // delivery estimate
-      out.deliveryEstimate = txt($('.delivery-time .show-tooltip'));
+    /* prices */
+    const pWrap = $(".p-final-price-wrapper");
+    domCtx.standardPrice   = num(stripCur(txt(pWrap?.querySelector(".price-standard"))));
+    domCtx.priceSave       = txt(pWrap?.querySelector(".price-save"));
+    domCtx.finalPrice      = num(stripCur(txt(pWrap?.querySelector(".price-final"))));
+    domCtx.additionalPrice = num(stripCur(txt(pWrap?.querySelector(".price-additional"))));
 
-      // cart amount (dynamic)
-      const amountInput=$('input[name="amount"].amount');
-      out.cartAmount = Number(amountInput?.value||1);
+    /* delivery estimate */
+    domCtx.deliveryEstimate = txt($(".detail-parameters .delivery-time, .delivery-time[data-testid='deliveryTime']"));
 
-      // short description (HTML)
-      out.shortDescription = $('.p-short-description')?.innerHTML.trim();
+    /* short description */
+    domCtx.shortDescription = $(".p-short-description")?.innerText.trim() || "";
 
-      // related / alternative products (ids only to keep payload sane)
-      out.relatedProducts     = $$('.products-related .product[data-micro-product-id]').map(p=>p.dataset.microProductId);
-      out.alternativeProducts = $$('.products-alternative .product[data-micro-product-id]').map(p=>p.dataset.microProductId);
-
-      // product meta from dataLayer (already flattened) – reuse state
-      const keys=[
-        'productId','productGuid','productCode','productName','productManufacturer',
-        'productPriceWithVat','productCurrency','productHasVariants'];
-      keys.forEach(k=>{ if(state[k]!==undefined) out[k]=state[k]; });
-
-      return out;
-    }
-
-    /* ---- CART PAGE ----------------------------------------------------- */
-    function scrapeCart(){
-      const out={};
-      const rows=$$('.cart-table tbody tr[data-micro-product-id]');
-      out.cartItems = rows.map(r=>{
-        const id      = r.dataset.microProductId;
-        const code    = r.dataset.microSku || txt($('.p-code span',r));
-        const name    = txt($('[data-testid="cellProductName"] a',r));
-        const qty     = Number($('input[name="amount"].amount',r)?.value||1);
-        const unit    = money($('[data-testid="cartItemPrice"]',r));
-        const total   = money($('[data-testid="cartPrice"]',r));
-        return {id,code,name,qty,unitPrice:unit,totalPrice:total};
+    /* cart amount + live update */
+    const qtyInput = $("input[name='amount'].amount");
+    if (qtyInput) {
+      domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
+      qtyInput.addEventListener("input", () => {
+        domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
+        window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
       });
-      out.cartTotal         = money('[data-testid="recapFullPrice"]');
-      out.cartTotalNoVat    = money('[data-testid="recapFullPriceNoVat"]');
-      out.deliveryEstimate  = txt($('.delivery-time strong'));
-      return out;
+      ["increase", "decrease"].forEach((cls) => {
+        $("button." + cls)?.addEventListener("click", () => {
+          // next tick (input already changed)
+          requestAnimationFrame(() => {
+            domCtx.cartAmount = parseInt(qtyInput.value, 10) || 1;
+            window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
+          });
+        });
+      });
     }
 
-    /* ---- CHECKOUT – SHIPPING & BILLING -------------------------------- */
-    function scrapeBillingShipping(){
-      const out={};
-      const selBilling = $('.order-summary-billing [data-testid="recapDeliveryMethod"]');
-      const selShipping= $('.order-summary-shipping [data-testid="recapDeliveryMethod"]');
-      out.selectedBilling  = selBilling?.innerText.trim();
-      out.billingPrice     = money(selBilling?.querySelector('[data-testid="recapItemPrice"]'));
-      out.selectedShipping = selShipping?.innerText.trim();
-      out.shippingPrice    = money(selShipping?.querySelector('[data-testid="recapItemPrice"]'));
-      return out;
+    /* related / alternative products */
+    function grabProducts (selector) {
+      return $$(selector).map((p) => {
+        const a = p.querySelector("a.image");
+        return {
+          code: p.querySelector(".p-code span")?.innerText.trim() || null,
+          id: p.dataset.microProductId || null,
+          url: a?.href || null,
+          img: a?.querySelector("img")?.src || null,
+          imgBig: a?.querySelector("img")?.dataset.microImage || null,
+          flags: $$(".flags span", p).map((f) => f.className.split(" ").find((c) => c.startsWith("flag-"))) || [],
+          name: txt(p.querySelector("[data-testid='productCardName']")),
+          rating: parseFloat(p.querySelector("[data-micro-rating-value]")?.dataset.microRatingValue) || null,
+          availability: txt(p.querySelector(".availability")),
+          availabilityTooltip: p.querySelector(".availability .show-tooltip")?.getAttribute("data-original-title") || "",
+          availabilityAmount: txt(p.querySelector("[data-testid='numberAvailabilityAmount']")),
+          standardPrice: txt(p.querySelector(".price-standard")),
+          priceSave: txt(p.querySelector(".price-save")),
+          finalPrice: txt(p.querySelector(".price-final")),
+          additionalPrice: txt(p.querySelector(".price-additional")),
+          priceId: p.querySelector("input[name='priceId']")?.value || null,
+          productId: p.querySelector("input[name='productId']")?.value || null,
+          csrf: p.querySelector("input[name='__csrf__']")?.value || null,
+          shortDescription: p.querySelector(".p-desc")?.innerText.trim() || "",
+          warranty: p.querySelector("[data-micro-warranty]")?.dataset.microWarranty || null
+        };
+      });
     }
+    domCtx.relatedProducts     = grabProducts(".products-related .product");
+    domCtx.alternativeProducts = grabProducts(".products-alternative .product");
 
-    /* ---- CHECKOUT – CUSTOMER DETAILS ---------------------------------- */
-    function scrapeCustomerDetails(){
-      const out={};
-      out.billFullName   = $('#billFullName')?.value.trim();
-      out.email          = $('#email')?.value.trim();
-      out.phone          = $('#phone')?.value.trim();
-      out.phoneCode      = $('.js-phone-code option:checked')?.textContent.trim();
-      out.billStreet     = $('#billStreet')?.value.trim();
-      out.billCity       = $('#billCity')?.value.trim();
-      out.billZip        = $('#billZip')?.value.trim();
-      out.billCountryId  = $('#billCountryIdInput')?.value;
-      out.anotherShipping= $('#another-shipping')?.checked || false;
-      out.remark         = $('#remark')?.value.trim();
-      return out;
+    /* parameters from table */
+    const params = $(".detail-parameters tbody");
+    if (params) {
+      $$("tr", params).forEach((tr) => {
+        const keyEl = tr.querySelector("th span.row-header-label");
+        const valEl = tr.querySelector("td");
+        if (!keyEl || !valEl) return;
+        const rawKey = keyEl.textContent.replace(/[:\s]+$/, "");
+        const safeKey = rawKey.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^A-Za-z0-9]/g, "").replace(/^([0-9])/, "_$1");
+        const value = txt(valEl);
+        domCtx[`param${safeKey}`] = value;
+      });
     }
+  }
 
-    // lens registration & first run --------------------------------------
-    lenses.set(LENS_ID,extract);
-    schedule(LENS_ID,'init');
+  function finishDomCtx () {
+    if (timing.domCtx.ready) return;
+    timing.domCtx.ready = true;
+    timing.domCtx.t     = getMs(startedAt);
+    timing.domCtx.data  = { ...domCtx };
+    window.dispatchEvent(new CustomEvent("contextDOMready", { detail: domCtx }));
+    dumpLog();
+  }
 
-    // observer to rescan on DOM mutations (inputs, ajax)
-    new MutationObserver(()=>schedule(LENS_ID,'MO')).observe(document.body,{subtree:true,childList:true});
-    document.addEventListener('input', ()=>schedule(LENS_ID,'input'), true);
-    document.addEventListener('change',()=>schedule(LENS_ID,'change'),true);
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    readDomCtx();
+    finishDomCtx();
+  } else {
+    window.addEventListener("DOMContentLoaded", () => {
+      readDomCtx();
+      finishDomCtx();
+    });
+  }
 
-    // fire ready once first ctxDOM built
-    onUpdate(({changedKeys})=>{ if(changedKeys.has('tDOM')) bus.emit('contextDOMready', snapshot()); });
-  })();
-
-  /* ---------------------------------------------------------------------- *
-   *  TEST LOG OUTPUT  (remove on production)                               *
-   * ---------------------------------------------------------------------- */
-  SOVA.bus.once('contextDOMready', ctx=>{
-    console.groupCollapsed('[SOVA ctx ready]', ctx.tDL+'ms DL / '+ctx.tDOM+'ms DOM');
-    console.table(ctx);
-    console.groupEnd();
-  });
-
-  /* ---------------------------------------------------------------------- *
-   *  PUBLIC API                                                           *
-   * ---------------------------------------------------------------------- */
-  window.SOVAL = window.SOVAL||{};
-  window.SOVAL.getContextFront = {
-    onUpdate,
-    snapshot,
-    ensure(keys){ keys.forEach(id=>schedule(id,'ensure')); }
-  };
+  /*─────────────── debug dump to console ───────────────────────*/
+  function dumpLog () {
+    console.log(JSON.stringify({
+      startedAt: timing.startedAt,
+      gtmDL: timing.gtmDL,
+      shoptetObj: timing.shoptetObj,
+      inlineDL: timing.inlineDL,
+      domCtx: timing.domCtx
+    }, null, 2));
+  }
 })();
