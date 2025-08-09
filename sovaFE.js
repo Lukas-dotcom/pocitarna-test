@@ -22,7 +22,7 @@
   const $$ = (q,root=document)=> Array.from(root.querySelectorAll(q));
   const toNum = v => { if (v == null) return undefined; const n = Number(v); return Number.isFinite(n) ? n : undefined; };
   const toInt = v => { if (v == null) return undefined; const n = parseInt(v,10); return Number.isNaN(n) ? undefined : n; };
-  const NBSP = ' '; // literal NBSP
+  const NBSP = ' '; // literal NBSP
   const text = (el)=> (el?.textContent||'').replaceAll(NBSP,' ').trim();
   const html = (el)=> el ? el.innerHTML.trim() : '';
   const sanitizeId = s => String(s||'').replace(/[^A-Za-z0-9]/g,'');
@@ -30,6 +30,20 @@
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .replace(/[^A-Za-z0-9]+/g,'')
     .replace(/^([0-9])/,'_$1');
+
+  // Split parameter values into a set (array) by a comma followed by a LONG run of spaces.
+  // Example raw: "aaaa,                                                                                 bbbb, cccccc"
+  // => ["aaaa", "bbbb, cccccc"]
+  const SEP_LONG_COMMA = /,[\s\u00A0]{8,}/; // comma + 8+ spaces (incl. NBSP)
+  function splitParamValues(raw){
+    if (!raw) return [];
+    // Keep commas; only split on "comma + long whitespace"
+    return raw.split(SEP_LONG_COMMA)
+              .map(s => s.replace(/\s+/g,' ').trim())
+              .filter(Boolean)
+              // dedupe while preserving order
+              .filter((v,i,a)=>a.indexOf(v)===i);
+  }
 
   // ===== Global flat context holder =====
   const ctx = Object.create(null); // flat; tables are arrays
@@ -180,7 +194,7 @@
   // Initial DL read
   const dlMs = readDataLayer();
 
-  // ===== DOM reader (unchanged spec-complete) =====
+  // ===== DOM reader =====
   function parsePrices_Product(){
     const root = $('.p-final-price-wrapper');
     return {
@@ -251,7 +265,8 @@
   }
 
   function parseDetailParameters(){
-    const tbl = $('.detail-parameters');
+    // Prefer detail-parameters INSIDE extended-description; fallback to global if needed
+    const tbl = document.querySelector('.extended-description .detail-parameters') || document.querySelector('.detail-parameters');
     const result = {};
     if (!tbl) return result;
 
@@ -271,15 +286,15 @@
     const eanRow = tbl.querySelector('.productEan');
     if (eanRow) result.EAN = text(eanRow.querySelector('.productEan__value')) || undefined;
 
-    // Ostatní parametry -> flat key/value
+    // Ostatní parametry -> flat key with ARRAY value (set semantics)
     Array.from(tbl.querySelectorAll('tr')).forEach(tr=>{
-      const th = text(tr.querySelector('th'));
+      const thTxt = (tr.querySelector('th')?.innerText || '').replaceAll(NBSP,' ').trim();
       const td = tr.querySelector('td');
-      if (!th || !td) return;
-      if (/Kategorie|Z[aá]ruka|EAN/i.test(th)) return; // already handled
-      const key = 'parametr' + safeKey(th);
-      let val = td.querySelector('a[href]') ? text(td.querySelector('a[href]')) : text(td);
-      result[key] = val || undefined;
+      if (!thTxt || !td) return;
+      if (/Kategorie|Z[aá]ruka|EAN/i.test(thTxt)) return; // already handled
+      const key = 'parametr' + safeKey(thTxt);
+      const rawVal = (td.innerText || '').replaceAll(NBSP,' '); // keep spacing to detect long separators
+      result[key] = splitParamValues(rawVal);
     });
 
     return result;
@@ -384,7 +399,7 @@
     // Extras
     out.noteActive          = !!$('#add-note')?.checked;
     out.doNotSendNewsletter = !!$('#sendNewsletter')?.checked;
-    out.setRegistration     = !!$('#set-registration')?.checked;
+    out.setRegistration     = !!('#set-registration' && $('#set-registration')?.checked);
     out.remark              = $('#remark')?.value || '';
 
     return out;
@@ -478,6 +493,27 @@
   }
 
   const domMs = readDOM();
+
+  // ===== Live logger: re-print snapshot on every tracked change =====
+  (function installLiveLogger(){
+    let raf = null;
+    let lastSource = null;
+    function scheduleLog(source, meta){
+      lastSource = source;
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(()=>{
+        try {
+          console.groupCollapsed(`[CTX] Update • ${lastSource}${meta?.tookMs!=null?` • ${Math.round(meta.tookMs)} ms`:''}`);
+          console.log('[snapshot]', { ...ctx });
+          console.groupEnd();
+        } catch(e){}
+        raf = null;
+      });
+    }
+    bus.on('contextDataLayerReady', p => { if (p?.snapshot) Object.assign(ctx, p.snapshot); scheduleLog('DataLayer', { tookMs: p?.tookMs }); });
+    bus.on('contextDOMready',      p => { if (p?.snapshot) Object.assign(ctx, p.snapshot); scheduleLog('DOM ready',  { tookMs: p?.tookMs }); });
+    bus.on('contextDOMupdate',     () => { scheduleLog('DOM update'); });
+  })();
 
   // ===== Dev: dump & timings =====
   try {
