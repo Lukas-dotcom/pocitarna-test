@@ -1061,12 +1061,17 @@ function featureSettings(name){
   if (via != null) return via;
   return window[name];
 }
-ns.FE_settings = ns.FE_settings || {};
-Object.defineProperty(ns, 'FE_settings', { get(){ return (_currentData?.features) || {}; } });
+Object.defineProperty(ns, 'FE_settings', {
+    get(){ return (_currentData?.features) || {}; }
+  });
 
-  // pohodlné aliasy:
-  ns.FE_settings = ns.FE_settings || {};
-  Object.defineProperty(ns, 'FE_settings', { get(){ return (_cacheMem?.data?.features)||{}; } });
+ns.rules = ns.rules || {};
+  Object.assign(ns.rules, {
+    load,                 // async funkce výše
+    for: rulesFor,
+    featureSettings,
+    get sourceInfo(){ return _sourceInfo; }
+  });
 })(SOVA);
 
   /*───────────────────────────────────────────────────────────────────────────*
