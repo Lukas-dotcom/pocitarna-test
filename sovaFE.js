@@ -1806,7 +1806,7 @@ if (TEST) {
 })(SOVA);
 
 /*───────────────────────────────────────────────────────────────────────────*
- * additionalSaleCart – upsell v košíku (FAST, no-mute transaction gate)
+ * additionalSaleCart – upsell v košíku (FAST, no-mute + mobile grid cell)
  *───────────────────────────────────────────────────────────────────────────*/
 (function registerAdditionalSaleCart(ns){
   if (!ns?.fn) return;
@@ -1817,6 +1817,7 @@ if (TEST) {
   const TEST = () => localStorage.getItem('SOVA.testSOVA.enabled') === '1';
   const DEEP = () => TEST() && localStorage.getItem('SOVA.testSOVA.deep') === '1';
   const now  = () => (performance && performance.now ? performance.now() : Date.now());
+  const isMobile = () => window.matchMedia && window.matchMedia('(max-width: 767.98px)').matches;
 
   /* CSS (jen jednou) */
   function ensureCartCSS(){
@@ -1824,6 +1825,7 @@ if (TEST) {
     const el = document.createElement('style');
     el.id = 'sova-upsell-cart-css';
     el.textContent = `
+/* Desktop/tablet default */
 td.p-name .sova-upsell, td.p-name .sova-upsell-select{ margin-top:6px; padding:0; border:0; background:none; font:inherit; }
 td.p-name .sova-upsell-row{ display:grid; grid-template-columns:auto 1fr auto; align-items:center; width:100%; line-height:1.2; border:0; margin:0; padding:0 0 0 10px; gap:0; }
 td.p-name .sova-upsell-row + .sova-upsell-row{ margin-top:0; }
@@ -1841,6 +1843,47 @@ td.p-name .sova-upsell-select-row{ display:grid; grid-template-columns:auto 1fr;
 td.p-name .sova-upsell-select-row + .sova-upsell-select-row{ margin-top:0; }
 td.p-name .sova-upsell-select-row label{ margin:0; padding:0; font-weight:400; border:0; white-space:nowrap; }
 td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0; padding:2px 8px; border:0 !important; background:none; font:inherit; line-height:1.2; -webkit-appearance:menulist; appearance:menulist; }
+
+/* ── MOBILE (<= 767.98px): vlastní grid area + flex řádky) ─────────────── */
+@media (max-width: 767.98px) {
+  /* Přepíšeme rozložení řádku cartItem a přidáme 'sova' area */
+  .cart-inner tr[data-micro="cartItem"] {
+    grid-template-areas:
+      "img name name"
+      "img availability quantity"
+      "img price-p price"
+      "sova sova sova" !important;
+  }
+  /* Upsell cell umístění do gridu a roztažení (fallback i bez areas) */
+  .cart-inner tr[data-micro="cartItem"] .sova-upsell-cell {
+    grid-area: sova !important;
+    grid-column: 1 / -1 !important;
+  }
+  /* Upsell boxy – mobilní vzhled */
+  .sova-upsell-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: .4rem .65rem;
+    border: .0625rem solid var(--color-primary);
+    border-radius: 5px;
+    margin-bottom: .4rem;
+    gap: .5rem;
+  }
+  /* Text vlevo od ceny */
+  .sova-upsell-row__text { flex: 1; text-align: left; }
+  /* Checkbox viditelný */
+  .sova-upsell__checkbox {
+    -webkit-appearance: auto !important;
+    position: static !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    width: auto !important;
+    height: auto !important;
+    margin: 0 5px 0 0 !important;
+    transform: none !important;
+  }
+}
 `;
     document.head.appendChild(el);
   }
@@ -1908,7 +1951,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     const onUpdated = () => {
       op.lastEventTs = Date.now();
       clearTimeout(op.idleTimer);
-      // krátké idle okno, ať doběhnou všechny DOM změny Shoptetu
       op.idleTimer = setTimeout(()=> finishOp('idle'), 160);
     };
 
@@ -1920,7 +1962,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
       document.removeEventListener('shoptet:cart:updated', onUpdated, true);
     };
 
-    // safety – kdyby event nepřišel
     op.safetyTimer = setTimeout(()=> finishOp('safety'), 1800);
   }
 
@@ -1935,14 +1976,12 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
   }
 
   function scheduleRender(reason){
-    // během operace nespouštěj re-render (vyvolal by další změny)
     if (op.active && reason !== 'op-done'){
       if (TEST()) console.log(TAG, 'render deferred (op active):', reason);
       return;
     }
     if (renderQueued) return;
     renderQueued = true;
-    // coalescing do dalšího frame
     requestAnimationFrame(() => { renderQueued = false; doRender(); });
   }
 
@@ -1953,9 +1992,8 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     beginOp('add ' + code);
     try{
       if (window.shoptet?.cartShared?.addToCart){
-        // true = suppress AO modal
         window.shoptet.cartShared.addToCart({ productCode: code, amount }, true);
-        return; // čekáme na CartUpdated
+        return;
       }
     }catch(e){ console.warn(TAG,'cartShared.addToCart failed',e); }
     try{
@@ -1967,7 +2005,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }catch(e){ console.error(TAG,'AJAX add failed', e); finishOp('ajax-error'); }
   }
 
-  // odstranění všech výskytů kódu (primárně přes itemId z kontextu)
   function removeAllByCode(code){
     if (!code) return;
     try{
@@ -1979,21 +2016,19 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
       beginOp('remove ' + code);
 
       if (!targets.length){
-        // fallback – když zrovna nemáme itemId v kontextu
         try{
           if (window.shoptet?.cartShared?.removeFromCart){
             window.shoptet.cartShared.removeFromCart({ productCode: code });
-            return; // čekáme na CartUpdated
+            return;
           }
         }catch(e){ console.warn(TAG,'fallback remove by productCode failed', e); finishOp('fallback-error'); }
         return;
       }
 
-      // postupné mazání (krátká pauza pro UI)
       let i = 0;
       const step = () => {
         const hit = targets[i++];
-        if (!hit){ /* vše vystřeleno → čekáme na CartUpdated/idle */ return; }
+        if (!hit){ return; }
         try {
           if (TEST()) console.log(TAG,'Remove by itemId:', hit.itemId, hit.name);
           shoptet.cartShared.removeFromCart({ itemId: hit.itemId });
@@ -2075,12 +2110,16 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     return set;
   }
 
-  /* ─── mount do buňky řádku ─────────────────────────────────────────────── */
+  /* ─── mount do buňky/řádku (desktop vs mobile) ────────────────────────── */
   function mountIntoRowCell(cell, upsellItems, cartRows, baseRow){
     if (!cell) return;
 
-    // smazat staré
+    // smazat staré v cíli (desktop buňka)
     cell.querySelectorAll('.sova-upsell,.sova-upsell-select').forEach(n=>n.remove());
+    // smazat případný mobilní cell v rámci stejného řádku
+    const tr = cell.closest('tr');
+    tr?.querySelectorAll('.sova-upsell-cell .sova-upsell,.sova-upsell-cell .sova-upsell-select').forEach(n=>n.remove());
+
     if (!upsellItems || !upsellItems.length) return;
 
     const ownerId = baseRow?.itemId || baseRow?.code || 'row';
@@ -2116,19 +2155,29 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }
     box.innerHTML = parts.join('');
 
-    // vložit hned za <a.main-link …>
-    const anchor = cell.querySelector('a.main-link[data-testid="cartProductName"]') || cell.querySelector('a.main-link');
-    if (anchor) anchor.insertAdjacentElement('afterend', box);
-    else cell.appendChild(box);
+    // —— DOM umístění: mobile → vlastní TD v řádku (grid area 'sova'), jinak za <a.main-link>
+    if (isMobile()){
+      let upsellCell = tr?.querySelector('.sova-upsell-cell');
+      if (!upsellCell){
+        upsellCell = document.createElement('td');
+        upsellCell.className = 'sova-upsell-cell';
+        tr?.appendChild(upsellCell);
+      } else {
+        upsellCell.innerHTML = '';
+      }
+      upsellCell.appendChild(box);
+    } else {
+      const anchor = cell.querySelector('a.main-link[data-testid="cartProductName"]') || cell.querySelector('a.main-link');
+      if (anchor) anchor.insertAdjacentElement('afterend', box);
+      else cell.appendChild(box);
+    }
 
-    // init checked
+    // init checked / select
     box.querySelectorAll('input.sova-upsell__checkbox').forEach(cb=>{
       const exists = codeExists(cartRows, cb.value);
       cb.checked = exists;
       TEST() && console.log(TAG,'init checkbox', { owner: ownerId, code: cb.value, checked: exists });
     });
-
-    // init select
     box.querySelectorAll('select.sova-upsell__select').forEach(sel=>{
       let chosen = '';
       [...sel.options].forEach(o => { if (o.value && codeExists(cartRows, o.value)) chosen = o.value; });
@@ -2143,14 +2192,12 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
       const t = e.target;
       if (!t) return;
 
-      // CHECKBOX
       if (t.matches('input.sova-upsell__checkbox')){
         const code = t.value;
         const pair = t.getAttribute('data-pair') || '';
         if (!code) return;
 
         if (t.checked){
-          // pair exkluzivita v rámci BUŇKY
           if (pair){
             box.querySelectorAll(`input.sova-upsell__checkbox[data-pair="${pair}"]`).forEach(other=>{
               if (other !== t && other.checked){
@@ -2167,8 +2214,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
           TEST() && console.log(TAG,'checkbox remove all', { owner: ownerId, code });
         }
       }
-
-      // SELECT
       else if (t.matches('select.sova-upsell__select')){
         const newCode = t.value;
         const prev    = t.dataset.prev || '';
@@ -2211,10 +2256,10 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
 
       ensureCartCSS();
 
-      // map TR podle kódu
+      // map TR podle kódu (desktop i mobile markup)
       const trByCode = new Map();
-      document.querySelectorAll('.cart-table tbody tr.removeable,[data-testid="cartTable"] tbody tr').forEach(tr=>{
-        const code = tr.getAttribute('data-micro-sku') || tr.getAttribute('data-code') || undefined;
+      document.querySelectorAll('.cart-table tbody tr.removeable,[data-testid="cartTable"] tbody tr,tr[data-micro="cartItem"]').forEach(tr=>{
+        const code = tr.getAttribute('data-micro-sku') || tr.getAttribute('data-code') || tr.getAttribute('data-micro-sku-code') || undefined;
         if (code) trByCode.set(code, tr);
       });
 
@@ -2225,17 +2270,23 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
         const code = row?.code;
         if (!code) return;
 
+        const tr = trByCode.get(code);
+        let cell = tr?.querySelector('td.p-name[data-testid="cellProductName"]') || tr?.querySelector('td.p-name');
+
         if (UPS_CODES.has(String(code))){
-          const tr = trByCode.get(code);
-          const cell = tr?.querySelector('td.p-name[data-testid="cellProductName"]');
+          // pro jistotu vždy smaž náš box jak v desktop buňce, tak v mobilní cell
           cell?.querySelectorAll('.sova-upsell,.sova-upsell-select').forEach(n=>n.remove());
+          tr?.querySelectorAll('.sova-upsell-cell .sova-upsell,.sova-upsell-cell .sova-upsell-select').forEach(n=>n.remove());
           return;
         }
 
-        const eligible = decideUpsellsForRow(row, ctx, cfg);
-        const tr = trByCode.get(code);
-        const cell = tr?.querySelector('td.p-name[data-testid="cellProductName"]');
+        if (!cell && tr){
+          // některé mobilní markupy nemusí mít klasickou p-name; použij první buňku jako fallback
+          cell = tr.querySelector('td') || null;
+        }
         if (!cell) return;
+
+        const eligible = decideUpsellsForRow(row, ctx, cfg);
         mountIntoRowCell(cell, eligible, rows, row);
       });
 
@@ -2247,10 +2298,10 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
   }
 
   /* ─── MO + eventy ──────────────────────────────────────────────────────── */
-  const isOurNode = (el) => !!(el && el.nodeType===1 && (el.closest?.('.sova-upsell,.sova-upsell-select') || el.id==='sova-upsell-cart-css'));
+  const isOurNode = (el) => !!(el && el.nodeType===1 && (el.closest?.('.sova-upsell,.sova-upsell-select,.sova-upsell-cell') || el.id==='sova-upsell-cart-css'));
   const touchesCart = (el) => !!(el && el.nodeType===1 && (
-    el.matches?.('.cart-table,[data-testid="cartTable"],.cart-items') ||
-    el.querySelector?.('.cart-table,[data-testid="cartTable"],.cart-items')
+    el.matches?.('.cart-table,[data-testid="cartTable"],.cart-items,.cart-inner') ||
+    el.querySelector?.('.cart-table,[data-testid="cartTable"],.cart-items,.cart-inner')
   ));
   const mo = new MutationObserver(muts=>{
     const anyCartChange = muts.some(m=>{
@@ -2292,8 +2343,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
   // public trigger
   ns.fn.register('additionalSaleCart', function(){ scheduleRender('fn.call'); });
 })(SOVA);
-
-
 
 
 
