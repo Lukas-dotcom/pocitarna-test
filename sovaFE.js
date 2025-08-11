@@ -154,6 +154,13 @@ function parseNumberStrict(v){
   return Number.isFinite(n) ? n : NaN;
 }
 
+// "" (nebo whitespace) v ARITMETICE = 0 ; jinak striktní parsing
+function toNumArith(v){
+  if (v === '' || (typeof v === 'string' && v.trim() === '')) return 0;
+  return parseNumberStrict(v);
+}
+
+
 /* ───────── Reg funkce + registry ───────── */
 const fnRegistry = Object.create(null);
 const aliasMap   = Object.create(null);
@@ -164,11 +171,26 @@ function reg(name, fn, ...aliases){
 reg('tofunction', x => x, 'tofunc', 'evalexpr', 'nafunkci', 'vyhodnot');
 
 // Aritmetika (nečíselný vstup → NaN + warning)
-reg('add',      (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('ADD → NaN', a, b); return NaN; } return na+nb; }, '+','secti');
-reg('subtract', (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('SUBTRACT → NaN', a, b); return NaN; } return na-nb; }, '-','odecti');
-reg('multiply', (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('MULTIPLY → NaN', a, b); return NaN; } return na*nb; }, '*','vynasob');
-reg('divide',   (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('DIVIDE → NaN', a, b); return NaN; } return na/nb; }, '/','vydel');
-reg('power',    (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('POWER → NaN', a, b); return NaN; } return Math.pow(na, nb); }, '^','umocni');
+// Aritmetika ("" => 0, jinak strict; nečíselný vstup → NaN + warning)
+reg('add',      (a,b)=>{ const na=toNumArith(a), nb=toNumArith(b);
+  if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('ADD → NaN', a, b); return NaN; }
+  return na+nb; }, '+','secti');
+
+reg('subtract', (a,b)=>{ const na=toNumArith(a), nb=toNumArith(b);
+  if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('SUBTRACT → NaN', a, b); return NaN; }
+  return na-nb; }, '-','odecti');
+
+reg('multiply', (a,b)=>{ const na=toNumArith(a), nb=toNumArith(b);
+  if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('MULTIPLY → NaN', a, b); return NaN; }
+  return na*nb; }, '*','vynasob');
+
+reg('divide',   (a,b)=>{ const na=toNumArith(a), nb=toNumArith(b);
+  if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('DIVIDE → NaN', a, b); return NaN; }
+  return na/nb; }, '/','vydel');
+
+reg('power',    (a,b)=>{ const na=toNumArith(a), nb=toNumArith(b);
+  if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('POWER → NaN', a, b); return NaN; }
+  return Math.pow(na, nb); }, '^','umocni');
 
 reg('abs', n => Math.abs(coerceNumber(n)));
 reg('randbetween',(a,b)=>Math.floor(Math.random()*(coerceNumber(b)-coerceNumber(a)+1))+coerceNumber(a),'nahoda','rnd');
