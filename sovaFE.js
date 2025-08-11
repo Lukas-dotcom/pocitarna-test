@@ -1513,24 +1513,18 @@ Object.assign(window.SOVAL, { calculateSOVAL });
     .replace(/[^A-Za-z0-9]+/g,'_').replace(/^_+|_+$/g,'')
     .toLowerCase();
 
-function buildCheckboxRow(it, ownerId){
-  const groupSlug = slug(it.pairText||it.name||'grp');
-  const codeSlug  = slug(it.code || it.name || Math.random().toString(36).slice(2));
-  const id   = `doplnek_${groupSlug}_${ownerId}_${codeSlug}`; // ← UNIKÁTNÍ
-  const name = esc(it.name||'');
-  const code = esc(it.code||'');
-  const priceTxt = ' +' + esc(String(it.price ?? ''));
-  const trig = groupSlug;
-  return `<label class="sova-upsell-row" for="${id}"> 
-    <input type="checkbox" class="sova-upsell__checkbox doplnekUprade" id="${id}" value="${code}" data-pair="${trig}">
-    <span class="sova-upsell-row__text">
-      ${name}
-      <span class="trigger-${trig} fv-lazy-visible fv-info-popup-target" data-popup-trigger="${trig}" title="" data-original-title="Zjistit více..."></span>
-    </span>
-    <span class="sova-upsell-row__price">${priceTxt}</span>
-  </label>`;
-}
-
+  function buildCheckboxRow(it){
+    const groupSlug = slug(it.pairText||it.name||'grp');
+    const id = 'doplnek_' + groupSlug;
+    const name = esc(it.name||'');
+    const code = esc(it.code||'');
+    const priceTxt = ' +' + esc(String(it.price ?? ''));
+    const trig = groupSlug;
+    return `<tr>
+  <td><label><input type="checkbox" class="doplnekUprade" id="${id}" value="${code}" data-pair="${trig}">${name} </label> <span class="trigger-${trig} fv-lazy-visible fv-info-popup-target" data-popup-trigger="${trig}" title="" data-original-title="Zjistit více..."></span></td>
+  <td>${priceTxt}</td>
+</tr>`;
+  }
 
   function buildSelectRow(title, groupSlug, options){
     const head = esc(title||'');
@@ -1913,7 +1907,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     const code = esc(it.code||'');
     const priceTxt = ' +' + esc(String(it.price ?? ''));
     const trig = groupSlug;
-    return `<label class="sova-upsell-row" for="${id}">
+    return `<label class="sova-upsell-row">
       <input type="checkbox" class="sova-upsell__checkbox doplnekUprade" id="${id}" value="${code}" data-pair="${trig}">
       <span class="sova-upsell-row__text">
         ${name}
