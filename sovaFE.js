@@ -1806,7 +1806,7 @@ if (TEST) {
 })(SOVA);
 
 /*───────────────────────────────────────────────────────────────────────────*
- * additionalSaleCart – upsell v košíku (removeFromCart by itemId)
+ * additionalSaleCart – upsell v košíku (FAST, no-mute transaction gate)
  *───────────────────────────────────────────────────────────────────────────*/
 (function registerAdditionalSaleCart(ns){
   if (!ns?.fn) return;
@@ -1888,52 +1888,86 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     </div>`;
   }
 
-  /* anticyklus */
-  let mutedUntil = 0;
-  const MUTE_MS  = 900;
-  function mute(ms=MUTE_MS){ mutedUntil = Date.now() + ms; TEST() && console.log(TAG,'mute',ms); }
-  function isMuted(){ return Date.now() < mutedUntil; }
-
+  /* ─── NO-MUTE transaction gate ─────────────────────────────────────────── */
   let renderQueued = false;
-  let debounceTimer = 0;
-  let retryOnceTimer = 0;
+  const op = {
+    active: false,
+    lastEventTs: 0,
+    idleTimer: 0,
+    safetyTimer: 0,
+    cleanup: null
+  };
+
+  function beginOp(label){
+    if (TEST()) console.log(TAG, 'op begin →', label);
+    op.active = true;
+    op.lastEventTs = 0;
+    clearTimeout(op.idleTimer);
+    clearTimeout(op.safetyTimer);
+
+    const onUpdated = () => {
+      op.lastEventTs = Date.now();
+      clearTimeout(op.idleTimer);
+      // krátké idle okno, ať doběhnou všechny DOM změny Shoptetu
+      op.idleTimer = setTimeout(()=> finishOp('idle'), 160);
+    };
+
+    document.addEventListener('ShoptetCartUpdated', onUpdated, true);
+    document.addEventListener('shoptet:cart:updated', onUpdated, true);
+
+    op.cleanup = () => {
+      document.removeEventListener('ShoptetCartUpdated', onUpdated, true);
+      document.removeEventListener('shoptet:cart:updated', onUpdated, true);
+    };
+
+    // safety – kdyby event nepřišel
+    op.safetyTimer = setTimeout(()=> finishOp('safety'), 1800);
+  }
+
+  function finishOp(reason){
+    if (!op.active) return;
+    if (TEST()) console.log(TAG, 'op finish ←', reason);
+    op.cleanup && op.cleanup();
+    clearTimeout(op.idleTimer);
+    clearTimeout(op.safetyTimer);
+    op.active = false;
+    scheduleRender('op-done');
+  }
+
   function scheduleRender(reason){
-    if (isMuted()){
-      if (!retryOnceTimer){
-        retryOnceTimer = setTimeout(()=>{ retryOnceTimer = 0; scheduleRender('unmute'); }, MUTE_MS+80);
-      }
-      TEST() && console.log(TAG,'schedule skipped (muted):', reason);
+    // během operace nespouštěj re-render (vyvolal by další změny)
+    if (op.active && reason !== 'op-done'){
+      if (TEST()) console.log(TAG, 'render deferred (op active):', reason);
       return;
     }
     if (renderQueued) return;
     renderQueued = true;
-    const delay = 80;
-    TEST() && console.log(TAG,'scheduleRender ←', reason, 'in', delay,'ms');
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(()=>{ renderQueued = false; doRender(); }, delay);
+    // coalescing do dalšího frame
+    requestAnimationFrame(() => { renderQueued = false; doRender(); });
   }
 
-  /* cart operace */
+  /* ─── cart operace (bez mute) ──────────────────────────────────────────── */
   function addByCode(code, amount){
     if (!code || !amount) return;
     TEST() && console.log(TAG,'addByCode', {code, amount});
+    beginOp('add ' + code);
     try{
       if (window.shoptet?.cartShared?.addToCart){
-        // "true" na konci tlumí advanced order modal
+        // true = suppress AO modal
         window.shoptet.cartShared.addToCart({ productCode: code, amount }, true);
-        mute(); scheduleRender('post-add'); return;
+        return; // čekáme na CartUpdated
       }
     }catch(e){ console.warn(TAG,'cartShared.addToCart failed',e); }
     try{
       if (window.jQuery){
         window.jQuery.post('/action/Cart/addCartItem/?simple_ajax_cart=1', {
           productCode: code, amount, __csrf__: (window.shoptet?.csrf?.token || '')
-        }).always(()=>{ mute(); scheduleRender('post-add-ajax'); });
+        }).always(()=> finishOp('ajax'));
       }
-    }catch(e){ console.error(TAG,'AJAX add failed', e); }
+    }catch(e){ console.error(TAG,'AJAX add failed', e); finishOp('ajax-error'); }
   }
 
-  // NOVĚ: mazání přes itemId z cartItemsExtended (odstraní všechny výskyty daného code)
+  // odstranění všech výskytů kódu (primárně přes itemId z kontextu)
   function removeAllByCode(code){
     if (!code) return;
     try{
@@ -1941,39 +1975,41 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
       const rows = Array.isArray(ctx.cartItemsExtended) ? ctx.cartItemsExtended : [];
       const targets = rows.filter(r => r?.code === code && r?.itemId);
 
-      if (TEST()) console.log(TAG,'removeAllByCode(itemId)', { code, found: targets.length });
+      TEST() && console.log(TAG,'removeAllByCode(itemId)', { code, found: targets.length });
+      beginOp('remove ' + code);
 
       if (!targets.length){
-        // fallback – když zrovna v kontextu není itemId, zkusíme productCode
+        // fallback – když zrovna nemáme itemId v kontextu
         try{
           if (window.shoptet?.cartShared?.removeFromCart){
             window.shoptet.cartShared.removeFromCart({ productCode: code });
-            mute(1200); scheduleRender('post-remove-fallback'); return;
+            return; // čekáme na CartUpdated
           }
-        }catch(e){ console.warn(TAG,'fallback remove by productCode failed', e); }
+        }catch(e){ console.warn(TAG,'fallback remove by productCode failed', e); finishOp('fallback-error'); }
         return;
       }
 
-      // smaž po jednom s malým odstupem (UI má čas zareagovat)
+      // postupné mazání (krátká pauza pro UI)
       let i = 0;
       const step = () => {
         const hit = targets[i++];
-        if (!hit){ mute(1200); scheduleRender('post-remove'); return; }
+        if (!hit){ /* vše vystřeleno → čekáme na CartUpdated/idle */ return; }
         try {
           if (TEST()) console.log(TAG,'Remove by itemId:', hit.itemId, hit.name);
           shoptet.cartShared.removeFromCart({ itemId: hit.itemId });
         } catch(e){
           console.warn(TAG,'removeFromCart(itemId) failed', hit.itemId, e);
         }
-        setTimeout(step, 200);
+        setTimeout(step, 60);
       };
       step();
     }catch(e){
       console.error(TAG,'removeAllByCode error', e);
+      finishOp('exception');
     }
   }
 
-  /* SOVAL per řádek */
+  /* ─── SOVAL per řádek ──────────────────────────────────────────────────── */
   function ctxForRow(row, baseCtx){
     return Object.assign({}, baseCtx, {
       row,
@@ -2039,7 +2075,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     return set;
   }
 
-  /* mount do buňky */
+  /* ─── mount do buňky řádku ─────────────────────────────────────────────── */
   function mountIntoRowCell(cell, upsellItems, cartRows, baseRow){
     if (!cell) return;
 
@@ -2114,7 +2150,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
         if (!code) return;
 
         if (t.checked){
-          // pair exkluzivita V RÁMCI BUŇKY
+          // pair exkluzivita v rámci BUŇKY
           if (pair){
             box.querySelectorAll(`input.sova-upsell__checkbox[data-pair="${pair}"]`).forEach(other=>{
               if (other !== t && other.checked){
@@ -2151,11 +2187,10 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }, { capture:true, passive:true });
   }
 
-  /* render */
+  /* ─── render ───────────────────────────────────────────────────────────── */
   let IS_RENDERING = false;
   function doRender(){
     if (IS_RENDERING) return;
-    if (isMuted()){ scheduleRender('muted-guard'); return; }
 
     IS_RENDERING = true;
     TEST() && console.log(TAG,'render START');
@@ -2211,7 +2246,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }
   }
 
-  /* MO + eventy */
+  /* ─── MO + eventy ──────────────────────────────────────────────────────── */
   const isOurNode = (el) => !!(el && el.nodeType===1 && (el.closest?.('.sova-upsell,.sova-upsell-select') || el.id==='sova-upsell-cart-css'));
   const touchesCart = (el) => !!(el && el.nodeType===1 && (
     el.matches?.('.cart-table,[data-testid="cartTable"],.cart-items') ||
