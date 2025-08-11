@@ -1840,9 +1840,9 @@ Object.assign(window.SOVAL, { calculateSOVAL });
   ns.fn.register('additionalSale', additionalSale);
 })(SOVA);
 
-
 /*───────────────────────────────────────────────────────────────────────────*
  * additionalSaleCart – upsell v košíku (FAST, no-mute + mobile grid cell)
+ *  + safe SOVAL debug (kompilace s try/catch, skip invalid, cache)
  *───────────────────────────────────────────────────────────────────────────*/
 (function registerAdditionalSaleCart(ns){
   if (!ns?.fn) return;
@@ -1882,7 +1882,6 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
 
 /* ── MOBILE (<= 767.98px): vlastní grid area + flex řádky) ─────────────── */
 @media (max-width: 767.98px) {
-  /* Přepíšeme rozložení řádku cartItem a přidáme 'sova' area */
   .cart-inner tr[data-micro="cartItem"] {
     grid-template-areas:
       "img name name"
@@ -1890,12 +1889,10 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
       "img price-p price"
       "sova sova sova" !important;
   }
-  /* Upsell cell umístění do gridu a roztažení (fallback i bez areas) */
   .cart-inner tr[data-micro="cartItem"] .sova-upsell-cell {
     grid-area: sova !important;
     grid-column: 1 / -1 !important;
   }
-  /* Upsell boxy – mobilní vzhled */
   .sova-upsell-row {
     display: flex;
     align-items: center;
@@ -1906,9 +1903,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     margin-bottom: .4rem;
     gap: .5rem;
   }
-  /* Text vlevo od ceny */
   .sova-upsell-row__text { flex: 1; text-align: left; }
-  /* Checkbox viditelný */
   .sova-upsell__checkbox {
     -webkit-appearance: auto !important;
     position: static !important;
@@ -2080,7 +2075,23 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }
   }
 
-  /* ─── SOVAL per řádek ──────────────────────────────────────────────────── */
+  /* ─── SOVAL per řádek (SAFE compile + debug) ───────────────────────────── */
+  const compiledCache = new Map(); // key: cond string → { fn|null, err|null, ms:number }
+  function getCompiled(cond){
+    const key = String(cond||'');
+    if (compiledCache.has(key)) return compiledCache.get(key);
+    let rec;
+    const t0 = now();
+    try{
+      const fn = ns.calculateSOVAL.compile(key, { debug:false });
+      rec = { fn, err: null, ms: now()-t0 };
+    }catch(err){
+      rec = { fn: null, err, ms: now()-t0 };
+    }
+    compiledCache.set(key, rec);
+    return rec;
+  }
+
   function ctxForRow(row, baseCtx){
     return Object.assign({}, baseCtx, {
       row,
@@ -2101,38 +2112,71 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
 
   function decideUpsellsForRow(row, baseCtx, rules){
     const rowCtx = ctxForRow(row, baseCtx);
-    const compiled = rules.map(it=>{
-      const cond = (typeof it.SOVAL === 'string') ? it.SOVAL.trim() : '';
-      return cond ? ns.calculateSOVAL.compile(cond, { debug:false }) : null;
-    });
+    const eligible  = [];
+    const debugRows = [];
 
-    const out = [];
     for (let i=0;i<rules.length;i++){
       const rule = rules[i] || {};
-      const cond = (typeof rule.SOVAL === 'string') ? rule.SOVAL.trim() : '';
-      let ok = true, took = 0;
-      if (cond && compiled[i]){
-        const t0 = now();
-        try { ok = !!compiled[i](rowCtx); }
-        catch(e){ ok = false; TEST() && console.warn(TAG,'SOVAL error',e); }
-        took = now() - t0;
+      const condRaw = (typeof rule.SOVAL === 'string') ? rule.SOVAL.trim() : '';
+      const meta = {
+        idx: i,
+        type: rule.type || 'checkbox',
+        pairText: rule.pairText || '',
+        code: rule.code || '',
+        name: rule.name || '',
+        price: String(rule.price ?? '')
+      };
 
-        if (DEEP()){
-          try {
-            console.groupCollapsed(`${TAG} rule → ${ok} ${took.toFixed(1)}ms`);
-            console.log(cond);
-            ns.calculateSOVAL.evalBool(cond, rowCtx, { debug:true });
-            console.groupEnd();
-          } catch(e){
-            console.warn(TAG,'deep debug failed', e);
-          }
-        } else if (TEST()) {
-          console.log(`${TAG} rule → ${ok} ${took.toFixed(1)}ms`, '\n', cond);
-        }
+      // prázdný výraz = true (zpětná kompatibilita)
+      if (!condRaw){
+        debugRows.push({ ok:true, ...meta, SOVAL:'<empty>', compileMs:0, evalMs:0 });
+        eligible.push(rule);
+        continue;
       }
-      if (ok) out.push(rule);
+
+      // bezpečná kompilace
+      const comp = getCompiled(condRaw);
+      if (comp.err){
+        if (TEST()) console.error(`${TAG} SOVAL compile error @#${i}`, comp.err, '\n', condRaw);
+        debugRows.push({ ok:false, ...meta, SOVAL:condRaw, compileErr:String(comp.err?.message||comp.err), compileMs:+comp.ms.toFixed(2), evalMs:0 });
+        continue; // neplatné pravidlo → přeskočit
+      }
+
+      // vyhodnocení
+      let ok = true, took = 0;
+      const t1 = now();
+      try { ok = !!comp.fn(rowCtx); }
+      catch(e){ ok = false; if (TEST()) console.warn(TAG,'SOVAL eval error @#'+i, e, '\n', condRaw); }
+      took = now() - t1;
+
+      // volitelný deep strom (drahé) jen když projde a je zapnutý
+      if (DEEP && ok){
+        try {
+          console.groupCollapsed(`${TAG} rule #${i} → ${ok} ${took.toFixed(1)}ms`);
+          console.log(condRaw);
+          ns.calculateSOVAL.evalBool(condRaw, rowCtx, { debug:true });
+          console.groupEnd();
+        } catch(e){
+          console.warn(TAG,'deep debug failed', e);
+        }
+      } else if (TEST()) {
+        console.log(`${TAG} rule #${i} → ${ok} ${took.toFixed(1)}ms`, '\n', condRaw);
+      }
+
+      debugRows.push({ ok, ...meta, SOVAL:condRaw, compileMs:+comp.ms.toFixed(2), evalMs:+took.toFixed(2) });
+      if (ok) eligible.push(rule);
     }
-    return out;
+
+    if (TEST()){
+      try{
+        console.groupCollapsed(`${TAG} rules summary • row ${row?.code||'?'} (${row?.name||''})  —  ${eligible.length}/${rules.length}`);
+        console.table(debugRows);
+        console.groupEnd();
+      }catch{
+        console.log(TAG, 'summary', debugRows);
+      }
+    }
+    return eligible;
   }
 
   function collectUpsellCodesFromSettings(cfg){
@@ -2191,7 +2235,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
     }
     box.innerHTML = parts.join('');
 
-    // —— DOM umístění: mobile → vlastní TD v řádku (grid area 'sova'), jinak za <a.main-link>
+    // DOM umístění: mobile → vlastní TD (grid area 'sova'), jinak za <a.main-link>
     if (isMobile()){
       let upsellCell = tr?.querySelector('.sova-upsell-cell');
       if (!upsellCell){
@@ -2379,6 +2423,7 @@ td.p-name .sova-upsell-select-row select{ width:100%; min-width:160px; margin:0;
   // public trigger
   ns.fn.register('additionalSaleCart', function(){ scheduleRender('fn.call'); });
 })(SOVA);
+
 
 
 
