@@ -964,14 +964,8 @@ Object.assign(window.SOVAL, { calculateSOVAL });
  *     - Pokud chybí, stáhne FE-sova-settings.js a vyhodnotí v sandboxu
  *───────────────────────────────────────────────────────────────────────────*/
 (function initRulesFE(ns){
-  const LS_KEY = 'SOVA.FE.rules.cache';
-  const TTL_MS = 15*60*1000;
-
-  let _cacheMem = null;     // { ts, data:{ injectFunctions, features }, source:'inline'|'github', url }
-  let _sourceInfo = null;
-
-  function _readLS(){ try{ const raw=localStorage.getItem(LS_KEY); return raw?JSON.parse(raw):null; }catch{return null;} }
-  function _writeLS(obj){ try{ localStorage.setItem(LS_KEY, JSON.stringify(obj)); }catch{} }
+let _currentData = null;  // { injectFunctions, features }
+let _sourceInfo = null;
 
   const GITHUB_URL = 'https://raw.githubusercontent.com/Lukas-dotcom/sova/refs/heads/main/FE-sova-settings.js';
 
@@ -1029,62 +1023,47 @@ Object.assign(window.SOVAL, { calculateSOVAL });
     return { injectFunctions, features, source:'github', url:GITHUB_URL };
   }
 
-  async function load(settingSource='FE', { force=false } = {}){
-    const now = Date.now();
+async function load(settingSource='FE'){
+  // 1) Primárně z inline globálů
+  let dataPack = _fromInline();
 
-    if (!force && _cacheMem && (now - _cacheMem.ts < TTL_MS)) {
-      _sourceInfo = { tsLoaded:_cacheMem.ts, source:_cacheMem.source, url:_cacheMem.url };
-      ns.bus.emit('rules:ready', { source:_sourceInfo, settings:_cacheMem.data });
-      return _cacheMem.data;
+  // 2) Fallback: GitHub
+  if (!dataPack || !Array.isArray(dataPack.injectFunctions) || dataPack.injectFunctions.length === 0){
+    try {
+      dataPack = await _fromGithub();
+    } catch(e){
+      console.error('[SOVA.rules.FE] GitHub fetch failed', e);
+      dataPack = { injectFunctions:[], features:{}, source:'none', url:null };
     }
-    if (!force){
-      const ls = _readLS();
-      if (ls && (now - ls.ts < TTL_MS)) {
-        _cacheMem = ls;
-        _sourceInfo = { tsLoaded:ls.ts, source:ls.source, url:ls.url };
-        ns.bus.emit('rules:ready', { source:_sourceInfo, settings:ls.data });
-        return ls.data;
-      }
-    }
-
-    // 1) Primárně z inline globálů
-    let dataPack = _fromInline();
-
-    // 2) PROVIZORNÍ fallback: GitHub
-    if (!dataPack || !Array.isArray(dataPack.injectFunctions) || dataPack.injectFunctions.length===0){
-      try { dataPack = await _fromGithub(); }
-      catch(e){ console.error('[SOVA.rules.FE] GitHub fetch failed', e); dataPack = { injectFunctions:[], features:{}, source:'none', url:null }; }
-    }
-
-    const data = { injectFunctions: dataPack.injectFunctions || [], features: dataPack.features || {} };
-    _cacheMem = { ts: now, data, source:dataPack.source, url:dataPack.url };
-    _writeLS(_cacheMem);
-    _sourceInfo = { tsLoaded: now, source:dataPack.source, url:dataPack.url };
-    ns.bus.emit('rules:ready', { source:_sourceInfo, settings:data });
-    return data;
-  }
-  async function reload(settingSource='FE'){ return load(settingSource, { force:true }); }
-
-  function rulesFor(featureName /* 'injectFunctions' */){
-    if (!_cacheMem || !_cacheMem.data) return null;
-    if (featureName === 'injectFunctions'){
-      const rules = _cacheMem.data.injectFunctions || [];
-      return { columns:null, rules };
-    }
-    return null;
-  }
-  function featureSettings(name){
-    // prefer cache; fallback na živé window[name] (když někdo nasype settings až později)
-    const viaCache = _cacheMem?.data?.features?.[name];
-    if (viaCache != null) return viaCache;
-    return window[name];
   }
 
-  ns.rules = ns.rules || {};
-  Object.assign(ns.rules, {
-    load, reload, for: rulesFor, featureSettings,
-    get sourceInfo(){ return _sourceInfo; }
-  });
+  const now = Date.now();
+  const data = { injectFunctions: dataPack.injectFunctions || [], features: dataPack.features || {} };
+
+  _currentData = data;
+  _sourceInfo  = { tsLoaded: now, source: dataPack.source, url: dataPack.url };
+
+  ns.bus.emit('rules:ready', { source:_sourceInfo, settings:data });
+  return data;
+}
+
+
+function rulesFor(featureName){
+  if (!_currentData) return null;
+  if (featureName === 'injectFunctions'){
+    const rules = _currentData.injectFunctions || [];
+    return { columns:null, rules };
+  }
+  return null;
+}
+function featureSettings(name){
+  const via = _currentData?.features?.[name];
+  if (via != null) return via;
+  return window[name];
+}
+ns.FE_settings = ns.FE_settings || {};
+Object.defineProperty(ns, 'FE_settings', { get(){ return (_currentData?.features) || {}; } });
+
   // pohodlné aliasy:
   ns.FE_settings = ns.FE_settings || {};
   Object.defineProperty(ns, 'FE_settings', { get(){ return (_cacheMem?.data?.features)||{}; } });
@@ -1239,7 +1218,6 @@ Object.assign(window.SOVAL, { calculateSOVAL });
 <div id="ruleTesterBox">
   <textarea id="rtb" placeholder='SOVAL výraz(y) – každý na vlastním řádku'></textarea>
   <button id="rtRun">testovat</button>
-  <button id="rtReload" title="Okamžitě načte FE settings znovu (force)">Reload settings</button>
   <button id="rtVars">Proměnné</button>
   <button id="rtClose" title="Zavřít tester">×</button>
 </div>`;
@@ -1247,7 +1225,6 @@ Object.assign(window.SOVAL, { calculateSOVAL });
       document.body.appendChild(box);
       const $rtb   = box.querySelector('#rtb');
       const $run   = box.querySelector('#rtRun');
-      const $reload= box.querySelector('#rtReload');
       const $vars  = box.querySelector('#rtVars');
       const $close = box.querySelector('#rtClose');
 
@@ -1270,28 +1247,7 @@ Object.assign(window.SOVAL, { calculateSOVAL });
 
       $run.onclick = runNow;
 
-      $reload.onclick = async () => {
-        try{
-          console.group('[SOVA.rules] Forced reload');
-          const t0 = performance.now();
-          const out = await (window.SOVA?.rules?.reload?.('FE') ?? Promise.reject('SOVA.rules.reload není k dispozici'));
-          const info = window.SOVA?.rules?.sourceInfo;
-          console.log('hotovo za', (performance.now()-t0).toFixed(1)+'ms');
-          console.log('sourceInfo:', info);
-          console.log('settings:', out);
-          console.groupEnd();
-          try{
-            const n = document.createElement('div');
-            n.textContent = 'FE settings reload: OK';
-            n.style.cssText = 'position:fixed;bottom:10px;left:10px;background:#0a6;color:#fff;padding:6px 8px;border-radius:6px;font:12px system-ui;z-index:1000000;box-shadow:0 2px 6px rgba(0,0,0,.2)';
-            document.body.appendChild(n);
-            setTimeout(()=>n.remove(), 1500);
-          }catch{}
-        }catch(e){
-          console.error('[SOVA.rules.reload] selhalo', e);
-          alert('Reload settings selhal: ' + e);
-        }
-      };
+
 
       $vars.onclick = ()=>{
         const ctx = window.SOVAL?.getContext?.snapshot?.() || {};
