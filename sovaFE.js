@@ -75,17 +75,18 @@
     ns.url = { match, toRegex };
   })(SOVA);
 
-  /*───────────────────────────────────────────────────────────────────────────*
-   * 2) SOVAL – BE jádro beze změny (vložené sem)
-   *     POZN.: Logika/emitory se nemění. (Zachováno kvůli kompatibilitě.)
-   *───────────────────────────────────────────────────────────────────────────*/
-  (function initSOVAL(){
-    if (SOVA.calculateSOVAL) return;
+ /*───────────────────────────────────────────────────────────────────────────*
+ * 2) SOVAL – BE jádro beze změny (vložené sem)
+ *     POZN.: Logika/emitory se nemění. (Zachováno kvůli kompatibilitě.)
+ *───────────────────────────────────────────────────────────────────────────*/
+(function initSOVAL(){
+  if (SOVA.calculateSOVAL) return;
 
 /* ───────── Pomůcky ───────── */
 const MS_MIN  = 60_000;
 const MS_HOUR = 60 * MS_MIN;
 const MS_DAY  = 24 * MS_HOUR;
+
 function parseDate(v){
   if (v == null || v === '') return NaN;
   if (typeof v === 'number') return v;
@@ -101,6 +102,7 @@ function parseDate(v){
   const ms  = Date.parse(iso);
   return Number.isNaN(ms) ? NaN : ms;
 }
+
 function coerceNumber(v){
   if (typeof v === 'number') return v;
   if (typeof v === 'boolean') return v ? 1 : 0;
@@ -139,6 +141,19 @@ function resolvePath(path, ctx){
 const median = arr => { if (!arr.length) return undefined; const s = [...arr].sort((a,b)=>a-b); const m = s.length>>1; return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
 const mode   = arr => { const map = new Map(); arr.forEach(v => map.set(v,(map.get(v)||0)+1)); let top, best=-1; map.forEach((cnt,val)=>{ if(cnt>best){best=cnt;top=val;} }); return top; };
 
+/* ───────── Test mód + striktní čísla ───────── */
+function isTestMode(){ try{ return localStorage.getItem('SOVA.testSOVA.enabled') === '1'; }catch{ return false; } }
+function warnTest(...args){ if (isTestMode()) { try{ console.warn('[SOVAL]', ...args); }catch{} } }
+
+// Povolit jen číslice, tečku a úvodní mínus. Pokud nezůstane žádná číslice → NaN.
+function parseNumberStrict(v){
+  if (v == null) return NaN;
+  const cleaned = String(v).replace(/[^\d.\-]/g,'');
+  if (!/[0-9]/.test(cleaned)) return NaN;
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : NaN;
+}
+
 /* ───────── Reg funkce + registry ───────── */
 const fnRegistry = Object.create(null);
 const aliasMap   = Object.create(null);
@@ -147,14 +162,17 @@ function reg(name, fn, ...aliases){
   [...aliases, name].forEach(a=>aliasMap[a.toLowerCase()] = name.toLowerCase());
 }
 reg('tofunction', x => x, 'tofunc', 'evalexpr', 'nafunkci', 'vyhodnot');
-// Aritmetika
-reg('add',(a,b)=>coerceNumber(a)+coerceNumber(b),'+','secti');
-reg('subtract',(a,b)=>coerceNumber(a)-coerceNumber(b),'-','odecti');
-reg('multiply',(a,b)=>coerceNumber(a)*coerceNumber(b),'*','vynasob');
-reg('divide',(a,b)=>coerceNumber(a)/coerceNumber(b),'/','vydel');
-reg('power',(a,b)=>Math.pow(coerceNumber(a),coerceNumber(b)),'^','umocni');
+
+// Aritmetika (nečíselný vstup → NaN + warning)
+reg('add',      (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('ADD → NaN', a, b); return NaN; } return na+nb; }, '+','secti');
+reg('subtract', (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('SUBTRACT → NaN', a, b); return NaN; } return na-nb; }, '-','odecti');
+reg('multiply', (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('MULTIPLY → NaN', a, b); return NaN; } return na*nb; }, '*','vynasob');
+reg('divide',   (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('DIVIDE → NaN', a, b); return NaN; } return na/nb; }, '/','vydel');
+reg('power',    (a,b)=>{ const na=parseNumberStrict(a), nb=parseNumberStrict(b); if(!Number.isFinite(na)||!Number.isFinite(nb)){ warnTest('POWER → NaN', a, b); return NaN; } return Math.pow(na, nb); }, '^','umocni');
+
 reg('abs', n => Math.abs(coerceNumber(n)));
 reg('randbetween',(a,b)=>Math.floor(Math.random()*(coerceNumber(b)-coerceNumber(a)+1))+coerceNumber(a),'nahoda','rnd');
+
 // Text
 reg('concat',(a,b)=>coerceString(a)+coerceString(b),'&','zretez');
 reg('concatenate',(sep,...rest)=>rest.map(coerceString).join(coerceString(sep)),'concatwith','join');
@@ -172,8 +190,10 @@ reg('normalizetext',(txt,repl='')=>{
   }
   return out;
 },'normalize','normalizovattext');
+
 // IF
 reg('if',(c,a,b='')=>coerceBoolean(c)?a:b,'kdyz','když');
+
 // Porovnání
 function parseNumberLoose(v){
   if (typeof v === 'number') return Number.isFinite(v)?v:NaN;
@@ -188,23 +208,89 @@ function cmpString(a,b){
   const sa = coerceString(a), sb = coerceString(b);
   return sa.localeCompare(sb, 'cs', { sensitivity:'accent' });
 }
-reg('equals',(a,b)=>{ const na=parseNumberLoose(a), nb=parseNumberLoose(b); return (Number.isFinite(na)&&Number.isFinite(nb))? na===nb : (cmpString(a,b)===0); },'=', '==','jerovno');
-reg('notEquals',(a,b)=>!fnRegistry.equals(a,b),'!=','<>','nenirovno');
-reg('isGreater',(a,b)=>{ const na=parseNumberLoose(a), nb=parseNumberLoose(b); return (Number.isFinite(na)&&Number.isFinite(nb))? na>nb : (cmpString(a,b)>0); },'>','jevetsi');
-reg('isLess',   (a,b)=>{ const na=parseNumberLoose(a), nb=parseNumberLoose(b); return (Number.isFinite(na)&&Number.isFinite(nb))? a<b : (cmpString(a,b)<0); },'<','jemensi');
-reg('isGreaterOrEqual',(a,b)=>{ const na=parseNumberLoose(a), nb=parseNumberLoose(b); return (Number.isFinite(na)&&Number.isFinite(nb))? a>=nb : (cmpString(a,b)>=0); },'>=','jevetsineborovno');
-reg('isLessOrEqual',   (a,b)=>{ const na=parseNumberLoose(a), nb=parseNumberLoose(b); return (Number.isFinite(na)&&Number.isFinite(nb))? a<=nb : (cmpString(a,b)<=0); },'<=','jemensinborovno');
+
+// = a !=: číselně když obě strany číslo; když žádná strana číslo → textově; jinak false + warning
+function equalsSmart(a,b){
+  const na = parseNumberStrict(a), nb = parseNumberStrict(b);
+  const aNum = Number.isFinite(na), bNum = Number.isFinite(nb);
+  if (aNum && bNum) return na === nb;
+
+  const aHasDigits = /[0-9]/.test(String(a));
+  const bHasDigits = /[0-9]/.test(String(b));
+  if (!aHasDigits && !bHasDigits) return cmpString(a,b) === 0;
+
+  warnTest('EQUALS mixed numeric/text → false', a, b);
+  return false;
+}
+reg('equals',    (a,b)=> equalsSmart(a,b), '=', '==','jerovno');
+reg('notEquals', (a,b)=> !equalsSmart(a,b), '!=','<>','nenirovno');
+
+// <, >, <=, >=: jen číselně (strict). Když aspoň jedna strana není číslo → false + warning
+function cmpNumericOrFalse(a,b, op){
+  const na = parseNumberStrict(a), nb = parseNumberStrict(b);
+  if (!Number.isFinite(na) || !Number.isFinite(nb)){
+    warnTest(`RELATIONAL ${op} – nečíselný operand → false`, a, b);
+    return false;
+  }
+  switch(op){
+    case '>':  return na >  nb;
+    case '<':  return na <  nb;
+    case '>=': return na >= nb;
+    case '<=': return na <= nb;
+    default: return false;
+  }
+}
+reg('isGreater',          (a,b)=>cmpNumericOrFalse(a,b,'>'),  '>','jevetsi');
+reg('isLess',             (a,b)=>cmpNumericOrFalse(a,b,'<'),  '<','jemensi');
+reg('isGreaterOrEqual',   (a,b)=>cmpNumericOrFalse(a,b,'>='), '>=' ,'jevetsineborovno');
+reg('isLessOrEqual',      (a,b)=>cmpNumericOrFalse(a,b,'<='), '<=', 'jemensinborovno');
+
 // Regex funkce
-reg('regextest',(text,pattern,case_sens)=>{ try{ const t=coerceString(text), pat=coerceString(pattern), ic=coerceBoolean(case_sens)?'':'i'; const rx=new RegExp(pat,'u'+ic); return rx.test(t); } catch(e){ console.warn('[REGEXTEST] Invalid pattern:',pattern,e); return false; }},'~','regexTest');
-reg('regexextract',(text,pattern,return_mode=0,case_sens)=>{ try{ const t=coerceString(text), pat=coerceString(pattern), all=Number(coerceNumber(return_mode))===1, ic=coerceBoolean(case_sens)?'':'i'; if(all){ const rxg=new RegExp(pat,'ug'+ic); const out=[]; let m; while((m=rxg.exec(t))){ out.push(m[1]??m[0]); if(m[0]==='') rxg.lastIndex++; } return out; } const rx=new RegExp(pat,'u'+ic); const m=rx.exec(t); return m? (m[1]??m[0]) : ''; }catch(e){ console.warn('[REGEXEXTRACT] Invalid pattern:',pattern,e); return (Number(coerceNumber(return_mode))===1)?[]:''; }});
-reg('regexreplace',(text,pattern,replacement,occurrence=0,case_sens)=>{ try{ const t=coerceString(text), pat=coerceString(pattern), repl=coerceString(replacement), occ=Math.trunc(coerceNumber(occurrence)||0), ic=coerceBoolean(case_sens)?'':'i'; const expand=(tpl,groupsArr,fullMatch)=> tpl.replace(/\$(\d+)/g,(_,$d)=>{ const n=Number($d); if(n===0) return fullMatch??''; return groupsArr[n-1]??''; }); if(occ===0){ const rxg=new RegExp(pat,'ug'+ic); return t.replace(rxg((match,...args)=>{ const groups=args.slice(0,args.length-2); return expand(repl,groups,match); })); } const rxg=new RegExp(pat,'ug'+ic); const matches=[]; let m; while((m=rxg.exec(t))){ matches.push({index:m.index,full:m[0],groups:m.slice(1)}); if(m[0]==='') rxg.lastIndex++; } if(!matches.length) return t; const idx=(occ>0)?(occ-1):(matches.length+occ); if(idx<0||idx>=matches.length) return t; const hit=matches[idx], before=t.slice(0,hit.index), after=t.slice(hit.index+hit.full.length), rep=expand(repl, hit.groups, hit.full); return before+rep+after; }catch(e){ console.warn('[REGEXREPLACE] Invalid pattern:',pattern,e); return coerceString(text); }});
+reg('regextest',(text,pattern,case_sens)=>{ try{
+  const t=coerceString(text), pat=coerceString(pattern), ic=coerceBoolean(case_sens)?'':'i';
+  const rx=new RegExp(pat,'u'+ic); return rx.test(t);
+} catch(e){ console.warn('[REGEXTEST] Invalid pattern:',pattern,e); return false; }},'~','regexTest');
+
+reg('regexextract',(text,pattern,return_mode=0,case_sens)=>{ try{
+  const t=coerceString(text), pat=coerceString(pattern),
+        all=Number(coerceNumber(return_mode))===1, ic=coerceBoolean(case_sens)?'':'i';
+  if(all){
+    const rxg=new RegExp(pat,'ug'+ic);
+    const out=[]; let m; while((m=rxg.exec(t))){ out.push(m[1]??m[0]); if(m[0]==='') rxg.lastIndex++; }
+    return out;
+  }
+  const rx=new RegExp(pat,'u'+ic); const m=rx.exec(t); return m? (m[1]??m[0]) : '';
+}catch(e){ console.warn('[REGEXEXTRACT] Invalid pattern:',pattern,e);
+  return (Number(coerceNumber(return_mode))===1)?[]:''; }});
+
+reg('regexreplace',(text,pattern,replacement,occurrence=0,case_sens)=>{ try{
+  const t=coerceString(text), pat=coerceString(pattern), repl=coerceString(replacement),
+        occ=Math.trunc(coerceNumber(occurrence)||0), ic=coerceBoolean(case_sens)?'':'i';
+  const expand=(tpl,groupsArr,fullMatch)=> tpl.replace(/\$(\d+)/g,(_,$d)=>{
+    const n=Number($d); if(n===0) return fullMatch??''; return groupsArr[n-1]??'';
+  });
+  if(occ===0){
+    const rxg=new RegExp(pat,'ug'+ic);
+    return t.replace(rxg, (match,...args)=>{ const groups=args.slice(0,args.length-2); return expand(repl,groups,match); });
+  }
+  const rxg=new RegExp(pat,'ug'+ic);
+  const matches=[]; let m; while((m=rxg.exec(t))){ matches.push({index:m.index,full:m[0],groups:m.slice(1)}); if(m[0]==='') rxg.lastIndex++; }
+  if(!matches.length) return t;
+  const idx=(occ>0)?(occ-1):(matches.length+occ);
+  if(idx<0||idx>=matches.length) return t;
+  const hit=matches[idx], before=t.slice(0,hit.index), after=t.slice(hit.index+hit.full.length), rep=expand(repl, hit.groups, hit.full);
+  return before+rep+after;
+}catch(e){ console.warn('[REGEXREPLACE] Invalid pattern:',pattern,e); return coerceString(text); }});
+
 reg('contains',(a,b)=>coerceString(a).includes(coerceString(b)),'contains');
 reg('startsWith',(a,b)=>coerceString(a).startsWith(coerceString(b)),'startswith','zacinana');
 reg('endsWith',  (a,b)=>coerceString(a).endsWith(coerceString(b)),'endswith','koncina');
+
 // Logické
 reg('NOT', x=>!coerceBoolean(x),'!','ne','not');
 reg('AND',(a,b)=>coerceBoolean(a)&&coerceBoolean(b),'a','and','&&');
 reg('OR', (a,b)=>coerceBoolean(a)||coerceBoolean(b),'nebo','or','||');
+
 // Délky období
 reg('now', ()=>Date.now(),'nyni','nyne','teď');
 reg('days',    v=>+(parseDate(v)/MS_DAY ).toFixed(2),'dny');
@@ -216,9 +302,24 @@ function preprocessOperators(src){
   const parts=[]; let i=0;
   const pushCode=(from,to)=>{ if(to>from) parts.push({type:'code',value:src.slice(from,to)}); };
   while(i<src.length){
-    if(src.startsWith('$RAW$',i)){ const start=i; i+=5; const end=src.indexOf('$RAW$',i); if(end===-1) throw new SyntaxError('Unterminated $RAW$ string'); const fullEnd=end+5; parts.push({type:'string', value:src.slice(start, fullEnd)}); i=fullEnd; continue; }
+    if(src.startsWith('$RAW$',i)){
+      const start=i; i+=5; const end=src.indexOf('$RAW$',i);
+      if(end===-1) throw new SyntaxError('Unterminated $RAW$ string');
+      const fullEnd=end+5; parts.push({type:'string', value:src.slice(start, fullEnd)}); i=fullEnd; continue;
+    }
     const c=src[i];
-    if(c==='"'||c==="'"){ const start=i; const quote=c; i++; let escaping=false; while(i<src.length){ const ch=src[i]; if(escaping){ escaping=false; i++; continue; } if(ch==='\\'){ escaping=true; i++; continue; } if(ch===quote){ i++; break; } i++; } if(i===src.length&&src[i-1]!==quote) throw new SyntaxError('Unterminated string literal'); parts.push({type:'string', value:src.slice(start,i)}); continue; }
+    if(c==='"'||c==="'"){
+      const start=i; const quote=c; i++; let escaping=false;
+      while(i<src.length){
+        const ch=src[i];
+        if(escaping){ escaping=false; i++; continue; }
+        if(ch==='\\'){ escaping=true; i++; continue; }
+        if(ch===quote){ i++; break; }
+        i++;
+      }
+      if(i===src.length&&src[i-1]!==quote) throw new SyntaxError('Unterminated string literal');
+      parts.push({type:'string', value:src.slice(start,i)}); continue;
+    }
     const start=i; while(i<src.length && !(src.startsWith('$RAW$',i)||src[i]==='"'||src[i]==="'")) i++;
     pushCode(start,i);
   }
@@ -243,7 +344,9 @@ function preprocessOperators(src){
   };
   return parts.map(p=>p.type==='code'? rewrite(p.value) : p.value).join('');
 }
+
 const TT = { NUMBER:'number', STRING:'string', IDENT:'ident', OP:'op', LPAREN:'(', RPAREN:')', COMMA:',', EOF:'eof' };
+
 function lex(src){
   const out=[]; let i=0; const push=(type,value)=>out.push({type,value});
   while(i<src.length){
@@ -263,6 +366,7 @@ function lex(src){
   }
   push(TT.EOF,''); return out;
 }
+
 function parser(tokens){
   let pos=0; const peek=()=>tokens[pos]; const next=()=>tokens[pos++];
   const aggregateSet=new Set(['any','all','countif','count','sumif','suma','sum','averageif','medianif','modeif','lookup','filter','unique','sortby']);
@@ -348,13 +452,15 @@ function reduceAggregates(node, ctx, hooks = {}){
   onLeaveAgg?.(node.name, out);
   return { type:'Literal', value: out };
 }
+
 function evalAst(node, ctx){
   switch(node.type){
     case 'Literal': return node.value;
     case 'Variable': {
       const v=resolvePath(node.name, ctx);
-      if (v===undefined && !node.name.includes(':') && !node.name.includes('.')) {
-        throw new ReferenceError(`Neznámá proměnná '${node.name}'. Pokud chcete text, zapište ho do uvozovek (např. "${node.name}").`);
+      if (v === undefined){
+        warnTest(`Neznámá proměnná '${node.name}' → ""`);
+        return "";
       }
       return v;
     }
@@ -374,14 +480,15 @@ function evalAst(node, ctx){
     default: throw new Error('Unknown AST node '+node.type);
   }
 }
+
 function debugEvalAst(node, ctx, depth=0){
   const pad='  '.repeat(depth);
   if (node.type==='Literal'){ console.log(`${pad}Literal(${node.value})`); return node.value; }
   if (node.type==='Variable'){
     const v=resolvePath(node.name, ctx);
-    if (v===undefined && !node.name.includes(':') && !node.name.includes('.')) {
-      console.log(`${pad}Variable ${node.name} → UNDEFINED`);
-      throw new ReferenceError(`Neznámá proměnná '${node.name}'. Pokud chcete text, zapište ho do uvozovek (např. "${node.name}").`);
+    if (v === undefined){
+      console.log(`${pad}Variable ${node.name} → "" (UNDEFINED)`);
+      return "";
     }
     console.log(`${pad}Variable ${node.name} →`, v); return v;
   }
@@ -458,7 +565,8 @@ SOVA.calculateSOVAL = calculateSOVAL;
 window.SOVAL = window.SOVAL || {};
 Object.assign(window.SOVAL, { calculateSOVAL });
 
-  })(); // end SOVAL
+})(); // end SOVAL
+
 
 /*───────────────────────────────────────────────────────────────────────────*
  * 3) FE Context – tvůj kód s drobnými změnami:
