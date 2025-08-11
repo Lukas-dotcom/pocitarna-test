@@ -1521,7 +1521,7 @@ function buildCheckboxRow(it, ownerId){
   const code = esc(it.code||'');
   const priceTxt = ' +' + esc(String(it.price ?? ''));
   const trig = groupSlug;
-  return `<label class="sova-upsell-row" for="${id}">
+  return `<label class="sova-upsell-row" for="${id}"> 
     <input type="checkbox" class="sova-upsell__checkbox doplnekUprade" id="${id}" value="${code}" data-pair="${trig}">
     <span class="sova-upsell-row__text">
       ${name}
