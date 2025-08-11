@@ -1495,12 +1495,14 @@ Object.assign(window.SOVAL, { calculateSOVAL });
  *  - po přidání hlavního produktu dopřidá vybrané kódy přes shoptet.cartShared.addToCart
  *  - DEBUG: pokud localStorage['SOVA.testSOVA.enabled'] === '1', loguje krok po kroku
  *───────────────────────────────────────────────────────────────────────────*/
+/*───────────────────────────────────────────────────────────────────────────*
+ * additionalSale – FE injekční funkce (lepší logování SOVAL + fail-safe)
+ *───────────────────────────────────────────────────────────────────────────*/
 (function registerAdditionalSale(ns){
   if (!ns?.fn) return;
 
   const TAG = '[additionalSale]';
   const isTest = () => localStorage.getItem('SOVA.testSOVA.enabled') === '1';
-  const DBG   = isTest;
 
   // Bezpečné escapování pro HTML
   const esc = (s)=> String(s??'')
@@ -1678,16 +1680,28 @@ Object.assign(window.SOVAL, { calculateSOVAL });
         const code = codes[i++];
         try {
           if (isTest()) console.log(TAG, 'add extra', { idx: i, code, amount });
-          // Shoptet API – přidání podle productCode
           shoptet.cartShared.addToCart({ productCode: code, amount }, true);
         } catch(e){
           console.error(TAG, 'addToCart failed', code, e);
         }
-        // malá prodleva mezi požadavky kvůli UI/událostem
         setTimeout(addNext, 350);
       };
       addNext();
     }, true);
+  }
+
+  // ─── Pomocné „lint“ tipy k SOVALu (rychlá heuristika) ────────────────────
+  function lintSoval(cond){
+    const tips = [];
+    const open = (cond.match(/\(/g)||[]).length;
+    const close= (cond.match(/\)/g)||[]).length;
+    if (open !== close) tips.push(`Nevyvážené závorky: "("=${open} vs ")"=${close}`);
+    const dq = (cond.match(/(?<!\\)"/g)||[]).length; // jednoduchý odhad
+    const sq = (cond.match(/(?<!\\)'/g)||[]).length;
+    if (dq % 2 === 1) tips.push('Nesudý počet dvojitých uvozovek (")');
+    if (sq % 2 === 1) tips.push("Nesudý počet jednoduchých uvozovek (')");
+    if (/[^!<>=]\s+=\s+[^=]/.test(cond)) tips.push('Rovná se (=) mimo funkci? V SOVALu je "=" operátor equals.');
+    return tips;
   }
 
   async function additionalSale({ params, settings }, ctx){
@@ -1704,86 +1718,107 @@ Object.assign(window.SOVAL, { calculateSOVAL });
         console.log('ctx keys:', Object.keys(ctx||{}));
         console.groupEnd();
       }
-
       if (!cfg.length) { if(isTest()) console.log(TAG,'no settings'); return; }
 
-      // SOVAL filtrace (sekvenčně; zachovat pořadí)
-     // SOVAL filtrace – rychlá cesta + volitelný deep debug + chunking pro plynulé UI
-const TEST = isTest();
-const DEEP_DEBUG = TEST && localStorage.getItem('SOVA.testSOVA.deep') === '1'; // zapni ručně jen když fakt potřebuješ strom
-const CHUNK_SIZE = Math.max(0, parseInt(localStorage.getItem('SOVA.testSOVA.chunk') || '0', 10)); // např. 25 pro dávky po frame
-const perfNow = () => (performance && performance.now ? performance.now() : Date.now());
+      const TEST = isTest();
+      const DEEP_DEBUG = TEST && localStorage.getItem('SOVA.testSOVA.deep') === '1';
+      const CHUNK_SIZE = Math.max(0, parseInt(localStorage.getItem('SOVA.testSOVA.chunk') || '0', 10));
 
-// Předkompiluj výrazy (bez debug) – compile má interní AST cache
-const compiled = cfg.map(it => {
-  const cond = (typeof it.SOVAL === 'string') ? it.SOVAL.trim() : '';
-  return cond ? ns.calculateSOVAL.compile(cond, { debug: false }) : null;
-});
+      // Bezpečná kompilace – nevalidní pravidlo zaloguju a označím jako false
+      const compiled = new Array(cfg.length).fill(null);
+      const compileErrors = [];
 
-const eligible  = [];
-const debugRows = [];
+      cfg.forEach((it, idx) => {
+        const cond = (typeof it.SOVAL === 'string') ? it.SOVAL.trim() : '';
+        if (!cond) return;
+        try{
+          compiled[idx] = ns.calculateSOVAL.compile(cond, { debug:false });
+        }catch(e){
+          const rid = it.id ?? it.name ?? it.code ?? `#${idx+1}`;
+          const tips = lintSoval(cond);
+          if (TEST){
+            console.groupCollapsed(`${TAG} SOVAL syntax error in rule ${rid}`);
+            console.error(e);
+            console.log('SOVAL:', cond);
+            if (tips.length) console.log('hints:', tips);
+            console.log('rule object:', it);
+            console.groupEnd();
+          } else {
+            console.warn(`${TAG} SOVAL syntax error in rule ${rid}:`, e?.message||e);
+          }
+          compileErrors.push({ idx, rule: rid, message: e?.message||String(e), SOVAL: cond });
+          compiled[idx] = null; // → bude vyhodnoceno jako false
+        }
+      });
 
-const evalOne = (it, idx) => {
-  const cond = (typeof it.SOVAL === 'string') ? it.SOVAL.trim() : '';
-  const meta = {
-    idx,
-    type: it.type || 'checkbox',
-    pairText: it.pairText || '',
-    code: it.code || '',
-    name: it.name || '',
-    price: String(it.price ?? '')
-  };
-
-  let ok = true, took = 0;
-  if (cond && compiled[idx]) {
-    const t0 = perfNow();
-    try {
-      ok = !!compiled[idx](ctx); // rychlé vyhodnocení bez logu
-    } catch (e) {
-      ok = false;
-      if (TEST) console.warn(TAG, `SOVAL error @#${idx}`, e);
-    }
-    took = perfNow() - t0;
-
-    // Volitelný „deep“ průchod jen v testu (drahý console log AST)
-    if (DEEP_DEBUG && ok) {
-      try {
-        ns.calculateSOVAL.evalBool(cond, ctx, { debug: true });
-      } catch (e) {
-        if (TEST) console.warn(TAG, `deep debug failed @#${idx}`, e);
+      if (TEST && compileErrors.length){
+        console.groupCollapsed(TAG, `compile errors (${compileErrors.length})`);
+        try { console.table(compileErrors); } catch { console.log(compileErrors); }
+        console.groupEnd();
       }
-    }
-  }
 
-  debugRows.push({ ok, ...meta, SOVAL: cond, took: +took.toFixed(2) });
-  if (ok) eligible.push(it);
-};
+      const eligible  = [];
+      const debugRows = [];
 
-if (CHUNK_SIZE > 0) {
-  // dávkuj přes RAF, ať UI nezamrzá
-  for (let i = 0; i < cfg.length; i += CHUNK_SIZE) {
-    const end = Math.min(i + CHUNK_SIZE, cfg.length);
-    for (let j = i; j < end; j++) evalOne(cfg[j], j);
-    // vydej čas pro vykreslení
-    await new Promise(requestAnimationFrame);
-  }
-} else {
-  // nejrychlejší celkový čas (blokující, ale bez debug logu to bude rychlé)
-  for (let i = 0; i < cfg.length; i++) evalOne(cfg[i], i);
-}
+      const evalOne = (it, idx) => {
+        const cond = (typeof it.SOVAL === 'string') ? it.SOVAL.trim() : '';
+        const meta = {
+          idx,
+          type: it.type || 'checkbox',
+          pairText: it.pairText || '',
+          code: it.code || '',
+          name: it.name || '',
+          price: String(it.price ?? '')
+        };
 
-if (TEST) {
-  console.groupCollapsed(TAG, `summary • eligible ${eligible.length}/${cfg.length}`);
-  try { console.table(debugRows); } catch { console.log(debugRows); }
-  console.groupEnd();
-}
+        // Pokud kompilace selhala → false (a důvod)
+        if (cond && !compiled[idx]){
+          debugRows.push({ ok:false, reason:'compile-error', ...meta, SOVAL: cond, took: 0 });
+          return; // nepushujeme
+        }
 
+        let ok = true, t0, took = 0;
+        if (cond && compiled[idx]) {
+          t0 = performance.now();
+          try {
+            ok = !!compiled[idx](ctx);
+          } catch (e) {
+            ok = false;
+            if (TEST) console.warn(TAG, `SOVAL runtime error @#${idx}`, e);
+          }
+          took = performance.now() - t0;
+
+          if (DEEP_DEBUG && ok) {
+            try { ns.calculateSOVAL.evalBool(cond, ctx, { debug:true }); }
+            catch (e){ if (TEST) console.warn(TAG, `deep debug failed @#${idx}`, e); }
+          }
+        }
+
+        debugRows.push({ ok, reason: ok?'':'runtime-error', ...meta, SOVAL: cond, took: +took.toFixed(2) });
+        if (ok) eligible.push(it);
+      };
+
+      if (CHUNK_SIZE > 0) {
+        for (let i = 0; i < cfg.length; i += CHUNK_SIZE) {
+          const end = Math.min(i + CHUNK_SIZE, cfg.length);
+          for (let j = i; j < end; j++) evalOne(cfg[j], j);
+          await new Promise(requestAnimationFrame);
+        }
+      } else {
+        for (let i = 0; i < cfg.length; i++) evalOne(cfg[i], i);
+      }
+
+      if (TEST) {
+        console.groupCollapsed(TAG, `summary • eligible ${eligible.length}/${cfg.length}`);
+        try { console.table(debugRows); } catch { console.log(debugRows); }
+        console.groupEnd();
+      }
 
       // render + hooky
       mountUI(eligible);
       hookAddFlow();
 
-      if (isTest()){
+      if (TEST){
         console.groupCollapsed(TAG, 'rendered items');
         try {
           console.table(eligible.map(x=>({
@@ -1794,7 +1829,7 @@ if (TEST) {
             price:String(x.price),
             SOVAL:x.SOVAL||''
           })));
-        } catch(_){ /* fallback */ console.log(eligible); }
+        } catch { console.log(eligible); }
         console.groupEnd();
       }
     }catch(e){
@@ -1804,6 +1839,7 @@ if (TEST) {
 
   ns.fn.register('additionalSale', additionalSale);
 })(SOVA);
+
 
 /*───────────────────────────────────────────────────────────────────────────*
  * additionalSaleCart – upsell v košíku (FAST, no-mute + mobile grid cell)
