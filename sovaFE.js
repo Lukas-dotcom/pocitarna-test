@@ -232,20 +232,36 @@ function cmpString(a,b){
 }
 
 // = a !=: číselně když obě strany číslo; když žádná strana číslo → textově; jinak false + warning
-function equalsSmart(a,b){
-  const na = parseNumberStrict(a), nb = parseNumberStrict(b);
-  const aNum = Number.isFinite(na), bNum = Number.isFinite(nb);
-  if (aNum && bNum) return na === nb;
+// --- Rovnost: numerická KOERCE jen když DRUHÁ hodnota je číslo ---
+function equalsSmart(a, b){
+  // Obě strany jsou čísla → číselně
+  if (typeof a === 'number' && Number.isFinite(a) &&
+      typeof b === 'number' && Number.isFinite(b)) {
+    return a === b;
+  }
 
-  const aHasDigits = /[0-9]/.test(String(a));
-  const bHasDigits = /[0-9]/.test(String(b));
-  if (!aHasDigits && !bHasDigits) return cmpString(a,b) === 0;
+  // Druhá strana je číslo → první zkus přísně převést
+  if (typeof b === 'number' && Number.isFinite(b)) {
+    const na = parseNumberStrict(a);
+    return Number.isFinite(na) ? (na === b) : false;
+  }
 
-  warnTest('EQUALS mixed numeric/text → false', a, b);
-  return false;
+  // První strana je číslo → druhou zkus přísně převést
+  if (typeof a === 'number' && Number.isFinite(a)) {
+    const nb = parseNumberStrict(b);
+    return Number.isFinite(nb) ? (a === nb) : false;
+  }
+
+  // Pokud jsou obě boolean → porovnej přímo
+  if (typeof a === 'boolean' && typeof b === 'boolean') return a === b;
+
+  // Jinak čistě textově (accent-sensitive, locale 'cs')
+  return cmpString(a, b) === 0;
 }
+
 reg('equals',    (a,b)=> equalsSmart(a,b), '=', '==','jerovno');
 reg('notEquals', (a,b)=> !equalsSmart(a,b), '!=','<>','nenirovno');
+
 
 // <, >, <=, >=: jen číselně (strict). Když aspoň jedna strana není číslo → false + warning
 function cmpNumericOrFalse(a,b, op){
